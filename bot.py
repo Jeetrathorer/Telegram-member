@@ -1164,6 +1164,135 @@ _autoreply_active  = {}
 _autoreply_clients = {}
 _autoreply_loops   = {}
 
+# ═══════════════════════════════════════════════════════
+#  REPLY RAID ENGINE
+# ═══════════════════════════════════════════════════════
+
+RAID_MESSAGES = [
+    "madarchod teri maa ki chut me ghutka khaake thook dunga 🤣🤣",
+    "teri maa ki chut me sutli bomb fod dunga 💣",
+    "teri maaki chut me scooter daal duga👅",
+    "teri maa ki chut kakte gali ke kutto me baat dunga 🦮",
+    "dudh hilaaunga teri vaheen ke upr niche 🆙😙",
+    "teri maa ki chut me hatth dalke bacche nikal dunga 😍",
+    "teri behn ki chut me kele ke chilke 🍌😍",
+    "teri vaheen dhandhe vaali 😋😛",
+    "teri maa ke bhosde me ac laga dunga saari garmi nikal jaayegi",
+    "teri vaheen ko horlicks peelaaunga madarchod😚",
+    "teri maa ki gaand me sariya daal dunga madarchod 😱",
+    "teri maa ko kolkata vaale jitu bhaiya ka lund mubarak 🤩",
+    "teri mummy ki fantasy hu lawde, tu apni bhen ko smbhaal 😈",
+    "tera pehla baap hu madarchod",
+    "aukat me reh vrna gaand me danda daal ke muh se nikaal dunga 🙄",
+    "teri mummy ke saath ludo khelte uske muh me loda de dunga😬",
+    "teri maa ki chut mei battery laga ke powerbank bana dunga 🔋🔥",
+    "teri maa ke gaand mei jhaadu dal ke mor bana dungaa 🦚🤩",
+    "bhosdike teri maa ki chut mei 4 hole hai bhofsdike👊🤢",
+    "teri bahen ki chut mei bargad ka ped uga dungaa 🤢🥳",
+    "teri maa ka group vaalon saath milke gang bang krunga🙌☠️",
+    "sun madarchod jyada na uchal maa chod denge ek min mei 🤣🔥",
+    "apni amma se puchna us kaali raat mei kaun chodne aaya thaaa! 😂👿",
+    "teri randi maa se puchna baap ka naam 🤩🥳",
+    "tu aur teri maa dono ki bhosde mei metro chalwa dunga 🚇😱",
+    "teri maa ki chut mei telegram ki sari randiyon ka randi khana khol dungaa👿😎",
+    "teri bahen ka vps bana ke 24x7 chudai command de dungaa 🔥",
+    "teri maa ki chut alexa dal ke dj bajaungaaa 🎶🤩",
+    "sun teri maa ka bhosda aur teri bahen ka bhi bhosda 👿😎",
+    "tu teri bahen tera khandan sab bahen ke lawde randi hai 🤢✅",
+    "tera baap hu bhosdike teri maa ko randi khane pe chudwake daaru peeta hu 🍷🔥",
+    "teri maa ko itna chodunga tera baap bhi usko pehchanane se mana kar dega👿",
+    "teri mummy aur bahen ko dauda dauda ne chodunga 😎🤣",
+    "teri maa ko itna chodunga ki sapne mei bhi meri chudai yaad karegi 💥",
+    "tujhe dekh ke teri randi bahen pe taras aata hai mujhe 💥🔥",
+    "teri maa ka naya randi khana kholunga chinta mat kar 👊🤣",
+    "tohar bahin chodu bahen ke lawde usme mitti dal ke cement se bhar du 🏠💥",
+    "tujhe ab nahi smjh aya ki mai hi hu tujhe paida karne wala bhosdikee 👊",
+    "teri maa ki chut aur teri bahen ka bhosda dono band kar dunga 😤",
+    "madarchod akal nahi hai kya teri? teri maa ne sikhaya nahi? 🤬",
+]
+
+# Reply Raid — global state
+_replyraid_users   = set()   # user_ids currently being raided
+_replyraid_active  = {}      # phone -> bool (watcher thread running)
+_replyraid_clients = {}      # phone -> Telethon client
+_replyraid_loops   = {}      # phone -> event loop
+
+
+def _start_replyraid_thread(acc, api_id, api_hash):
+    """Start a Telethon watcher for one account to auto-reply raided users."""
+    import random as _rnd
+    phone = acc["phone"]
+    if _replyraid_active.get(phone):
+        return
+
+    def _thread_fn():
+        loop   = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        client = get_client(phone, api_id, api_hash)
+        _replyraid_clients[phone] = client
+        _replyraid_loops[phone]   = loop
+
+        async def _run():
+            await client.connect()
+            if not await client.is_user_authorized():
+                return
+
+            @client.on(events.NewMessage(incoming=True))
+            async def _raid_watch(event):
+                if not _replyraid_active.get(phone):
+                    raise events.StopPropagation
+                try:
+                    if event.message.out:
+                        return
+                    if event.message.sender_id not in _replyraid_users:
+                        return
+                    sender = await event.get_sender()
+                    if sender and getattr(sender, "bot", False):
+                        return
+                    await asyncio.sleep(_rnd.uniform(0.4, 1.2))
+                    await event.reply(_rnd.choice(RAID_MESSAGES))
+                except Exception:
+                    pass
+
+            await client.run_until_disconnected()
+
+        try:
+            loop.run_until_complete(_run())
+        except Exception:
+            pass
+        finally:
+            try:
+                loop.close()
+            except Exception:
+                pass
+
+    _replyraid_active[phone] = True
+    threading.Thread(target=_thread_fn, daemon=True, name=f"replyraid-{phone}").start()
+
+
+def _stop_replyraid_thread(phone):
+    _replyraid_active[phone] = False
+    client = _replyraid_clients.get(phone)
+    loop   = _replyraid_loops.get(phone)
+    if client and loop and loop.is_running():
+        asyncio.run_coroutine_threadsafe(client.disconnect(), loop)
+
+
+def _ensure_replyraid_running():
+    d        = load()
+    cfg      = d["config"]
+    api_id   = cfg.get("api_id", 0)
+    api_hash = cfg.get("api_hash", "")
+    for acc in [a for a in d["accounts"] if a.get("active") and a.get("verified")]:
+        _start_replyraid_thread(acc, api_id, api_hash)
+
+
+def _stop_all_replyraid():
+    for phone in list(_replyraid_active.keys()):
+        _stop_replyraid_thread(phone)
+
+
+
 def _start_autoreply_thread(acc, api_id, api_hash):
     phone     = acc["phone"]
 
@@ -2511,9 +2640,31 @@ async def do_group_add_campaign(chat_id_bot, scrape_id, target_group, invite_lin
 # ═══════════════════════════════════════════════════════
 
 def _init_bot_token():
-    """Ensure bot token is set; prompt on first run via CLI."""
+    """Load config from ENV vars (Heroku) or prompt on first CLI run."""
     d = load()
     cfg = d["config"]
+    changed = False
+
+    # ── Heroku / environment variable support ────────────────────────────────
+    env_token    = os.environ.get("BOT_TOKEN", "").strip()
+    env_api_id   = os.environ.get("API_ID", "").strip()
+    env_api_hash = os.environ.get("API_HASH", "").strip()
+    env_admin_id = os.environ.get("ADMIN_ID", "").strip()
+
+    if env_token and not cfg.get("bot_token"):
+        cfg["bot_token"] = env_token; changed = True
+    if env_api_id and not cfg.get("api_id"):
+        try: cfg["api_id"] = int(env_api_id); changed = True
+        except ValueError: pass
+    if env_api_hash and not cfg.get("api_hash"):
+        cfg["api_hash"] = env_api_hash; changed = True
+    if env_admin_id and not cfg.get("admin_ids"):
+        try: cfg["admin_ids"].append(int(env_admin_id)); changed = True
+        except ValueError: pass
+    if changed:
+        save(d); return
+
+    # ── CLI fallback (local run) ──────────────────────────────────────────────
     if not cfg.get("bot_token"):
         print("\n╔══════════════════════════════════════════════╗")
         print("║   Pehli baar setup — Bot Token daalo        ║")
@@ -2905,6 +3056,10 @@ def cmd_help(msg):
         "/promo — sabhi groups mein promote karo\n\n"
         "<b>🤖 Auto-Reply:</b>\n"
         "/autoreply — AI auto-reply ON/OFF\n\n"
+        "<b>⚔️ Reply Raid:</b>\n"
+        "/replyraid — user pe reply raid chalu karo\n"
+        "/stopraid  — raid band karo\n"
+        "/raidlist  — active raids list\n\n"
         "<b>👤 Misc:</b>\n"
         "/cloneprofile — profile clone\n"
         "/autoclean — inactive groups chhodo\n\n"
@@ -4226,6 +4381,87 @@ def cmd_autoreply(msg):
         btns.append(("❌ Sabhi OFF Karo", "autoreply_all_off"))
     kb = make_inline([btns] if btns else [])
     bot.reply_to(msg, "\n".join(lines), reply_markup=kb if btns else None)
+
+
+# ── /replyraid ────────────────────────────────────────────────────────────────
+@bot.message_handler(commands=["replyraid"])
+def cmd_replyraid(msg):
+    if not is_admin(msg.from_user.id):
+        bot.reply_to(msg, "❌ Access denied!"); return
+    target_id = None; target_name = None
+    if msg.reply_to_message and msg.reply_to_message.from_user:
+        ru = msg.reply_to_message.from_user
+        target_id = ru.id; target_name = ru.first_name or str(ru.id)
+    else:
+        parts = msg.text.split(maxsplit=1)
+        if len(parts) >= 2 and parts[1].strip().lstrip("-").isdigit():
+            target_id = int(parts[1].strip()); target_name = str(target_id)
+        else:
+            bot.reply_to(msg,
+                "⚔️ <b>Reply Raid</b>\n\n"
+                "Use: kisi ke message pe reply karke <code>/replyraid</code> likho\n"
+                "Ya: <code>/replyraid &lt;user_id&gt;</code>\n\n"
+                "Band karne: <code>/stopraid</code> (reply) ya <code>/stopraid all</code>\n"
+                "List: <code>/raidlist</code>"); return
+    d = load(); cfg = d["config"]
+    active = [a for a in d["accounts"] if a.get("active") and a.get("verified")]
+    if not active:
+        bot.reply_to(msg, "❌ Koi active account nahi! /add se pehle account add karo."); return
+    _replyraid_users.add(target_id)
+    _ensure_replyraid_running()
+    bot.reply_to(msg,
+        f"⚔️ <b>Reply Raid CHALU!</b>\n\n"
+        f"🎯 Target: <b>{target_name}</b> (<code>{target_id}</code>)\n"
+        f"📱 Active Accounts: <b>{len(active)}</b>\n\n"
+        f"Ab jab bhi ye user message bhejega, automatically gali reply jayegi! 😈\n"
+        f"Band karne ke liye us user ke message pe reply karke <code>/stopraid</code> likho")
+
+
+# ── /stopraid ─────────────────────────────────────────────────────────────────
+@bot.message_handler(commands=["stopraid"])
+def cmd_stopraid(msg):
+    if not is_admin(msg.from_user.id):
+        bot.reply_to(msg, "❌ Access denied!"); return
+    parts = msg.text.split(maxsplit=1)
+    if len(parts) >= 2 and parts[1].strip().lower() == "all":
+        count = len(_replyraid_users)
+        _replyraid_users.clear(); _stop_all_replyraid()
+        bot.reply_to(msg, f"✅ <b>Sabhi Reply Raids Band!</b>\n❌ {count} target(s) hataye gaye."); return
+    target_id = None; target_name = None
+    if msg.reply_to_message and msg.reply_to_message.from_user:
+        ru = msg.reply_to_message.from_user
+        target_id = ru.id; target_name = ru.first_name or str(ru.id)
+    elif len(parts) >= 2 and parts[1].strip().lstrip("-").isdigit():
+        target_id = int(parts[1].strip()); target_name = str(target_id)
+    else:
+        bot.reply_to(msg,
+            "Use: kisi ke message pe reply karke <code>/stopraid</code>\n"
+            "Ya: <code>/stopraid &lt;user_id&gt;</code>\n"
+            "Sab band: <code>/stopraid all</code>"); return
+    if target_id in _replyraid_users:
+        _replyraid_users.discard(target_id)
+        if not _replyraid_users: _stop_all_replyraid()
+        bot.reply_to(msg,
+            f"✅ <b>Raid Band!</b>\n"
+            f"🎯 <b>{target_name}</b> (<code>{target_id}</code>) ko ab reply nahi jayega.")
+    else:
+        bot.reply_to(msg, f"⚠️ <code>{target_id}</code> raid list mein nahi tha.")
+
+
+# ── /raidlist ─────────────────────────────────────────────────────────────────
+@bot.message_handler(commands=["raidlist"])
+def cmd_raidlist(msg):
+    if not is_admin(msg.from_user.id):
+        bot.reply_to(msg, "❌ Access denied!"); return
+    if not _replyraid_users:
+        bot.reply_to(msg,
+            "⚔️ <b>Reply Raid List</b>\n\nKoi user raid mein nahi hai.\n"
+            "Shuru karne ke liye: <code>/replyraid</code>"); return
+    lines = [f"⚔️ <b>Active Reply Raids ({len(_replyraid_users)}):</b>\n"]
+    for uid_r in _replyraid_users: lines.append(f"  🎯 <code>{uid_r}</code>")
+    lines.append("\nBand karne ke liye: <code>/stopraid all</code>")
+    bot.reply_to(msg, "\n".join(lines))
+
 
 # ── /cloneprofile ─────────────────────────────────────────────────────────────
 @bot.message_handler(commands=["cloneprofile"])
