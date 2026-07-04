@@ -1,10 +1,8 @@
 {
   "name": "Telegram Master Bot",
   "description": "All-in-One Telegram Bot — Broadcast, Scrape, TagAll, Reply Raid, AutoReply & more",
-  "logo": "https://i.imgur.com/4JGkBl3.png",
   "keywords": ["telegram", "bot", "python", "telethon"],
   "repository": "https://github.com/Jeetrathorer/Telegram-member",
-  "success_url": "/",
   "env": {
     "BOT_TOKEN": {
       "description": "Telegram Bot Token — @BotFather se banao",
@@ -21,12 +19,6 @@
     "ADMIN_ID": {
       "description": "Apna Telegram User ID — @userinfobot se pata karo",
       "required": true
-    }
-  },
-  "formation": {
-    "worker": {
-      "quantity": 1,
-      "size": "eco"
     }
   },
   "buildpacks": [
