@@ -6347,9 +6347,51 @@ def first_run_wizard():
 #  MAIN
 # ═══════════════════════════════════════════════════════
 
+def _start_bot_polling():
+    """Seedha bot polling shuru karo — Heroku/server mode ke liye."""
+    d       = load()
+    token   = d["config"].get("bot_token", "")
+    adm_ids = [str(x) for x in d["config"].get("admin_ids", [])]
+    accs    = d["accounts"]
+    active  = sum(1 for a in accs if a.get("active") and a.get("verified"))
+    print(f"\n✅ Telegram Master Bot chal raha hai!")
+    try:
+        r = requests.get(f"https://api.telegram.org/bot{token}/getMe", timeout=10).json()
+        if r.get("ok"):
+            info = r["result"]
+            print(f"   Bot : {info['first_name']} (@{info.get('username','?')})")
+    except Exception:
+        pass
+    print(f"   Admin IDs : {adm_ids}")
+    print(f"   Accounts  : {active}/{len(accs)} active")
+    print(f"   Mode      : {'Heroku/Server' if not sys.stdin.isatty() else 'Local'}\n")
+    bot.infinity_polling(timeout=20, long_polling_timeout=10)
+
+
 def main():
     data = load()
     cfg  = data["config"]
+
+    # ── Non-interactive mode (Heroku, Railway, VPS) ──────────────────────────
+    # DYNO env var = Heroku; ya stdin TTY nahi = server/pipe mode
+    is_heroku = bool(os.environ.get("DYNO"))
+    is_server = not sys.stdin.isatty()
+
+    if is_heroku or is_server:
+        # Config ENV vars se aa jaati hai (_init_bot_token already run ho chuka)
+        if not cfg.get("bot_token"):
+            print("❌ BOT_TOKEN env var set nahi hai! Heroku Config Vars check karo.")
+            sys.exit(1)
+        if not cfg.get("api_id"):
+            print("❌ API_ID env var set nahi hai! Heroku Config Vars check karo.")
+            sys.exit(1)
+        if not cfg.get("admin_ids"):
+            print("❌ ADMIN_ID env var set nahi hai! Heroku Config Vars check karo.")
+            sys.exit(1)
+        _start_bot_polling()
+        return
+
+    # ── Interactive CLI menu (local run) ─────────────────────────────────────
     if not cfg.get("bot_token") or not cfg.get("api_id") or not cfg.get("admin_ids"):
         first_run_wizard()
 
@@ -6373,7 +6415,10 @@ def main():
         if not ready: print(f"\n  {Y}⚠  Pehle Setup karo (Option 1){NC}\n")
         print(f"  {W}0.{NC} Exit")
 
-        c = input(f"\n  {W}Chuno:{NC} ").strip()
+        try:
+            c = input(f"\n  {W}Chuno:{NC} ").strip()
+        except (EOFError, KeyboardInterrupt):
+            break
         if c == "0":
             clr(); print(f"\n  {G}Bye! 👋{NC}\n"); break
         elif c == "1": setup_menu()
@@ -6383,22 +6428,7 @@ def main():
             if not ready: err("Pehle Setup karo!"); pause()
             else:
                 clr()
-                d      = load()
-                token  = d["config"].get("bot_token", "")
-                adm_ids = [str(x) for x in d["config"].get("admin_ids", [])]
-                print(f"\n{G}  Bot chal raha hai!{NC}")
-                try:
-                    r = requests.get(f"https://api.telegram.org/bot{token}/getMe", timeout=10).json()
-                    if r.get("ok"):
-                        print(f"  {W}{r['result']['first_name']}{NC} (@{r['result']['username']})")
-                except Exception:
-                    pass
-                print(f"  Admin IDs: {adm_ids}")
-                print(f"  {DIM}Ctrl+C se band karo{NC}\n")
-                try:
-                    bot.infinity_polling(timeout=20, long_polling_timeout=10)
-                except KeyboardInterrupt:
-                    print(f"\n  {Y}Bot band kiya.{NC}")
+                _start_bot_polling()
         else: err("Galat choice!"); time.sleep(0.4)
 
 
