@@ -6437,7 +6437,32 @@ if __name__ == "__main__":
     print("\n╔══════════════════════════════════════════════════╗")
     print("║   🤖 Telegram Master Bot — All-in-One Edition   ║")
     print("╚══════════════════════════════════════════════════╝\n")
-    try:
-        main()
-    except KeyboardInterrupt:
-        print(f"\n\n  {Y}Bye!{NC}\n")
+
+    # --server flag = Heroku/Railway/VPS mode — menu skip, seedha bot chalu
+    SERVER_MODE = (
+        "--server" in sys.argv
+        or bool(os.environ.get("DYNO"))          # Heroku
+        or bool(os.environ.get("RAILWAY_ENV"))   # Railway
+        or not sys.stdin.isatty()                # any non-interactive shell
+    )
+
+    if SERVER_MODE:
+        d   = load()
+        cfg = d["config"]
+        missing = []
+        if not cfg.get("bot_token"):  missing.append("BOT_TOKEN")
+        if not cfg.get("api_id"):     missing.append("API_ID")
+        if not cfg.get("admin_ids"):  missing.append("ADMIN_ID")
+        if missing:
+            print(f"❌ Yeh Config Vars set nahi hain: {', '.join(missing)}")
+            print("   Heroku Dashboard → Settings → Config Vars mein add karo.")
+            sys.exit(1)
+        try:
+            _start_bot_polling()
+        except KeyboardInterrupt:
+            print("\nBot band kiya.")
+    else:
+        try:
+            main()
+        except KeyboardInterrupt:
+            print(f"\n\n  {Y}Bye!{NC}\n")
