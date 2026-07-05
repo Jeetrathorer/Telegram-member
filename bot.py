@@ -1232,11 +1232,11 @@ def _notify_admin(text):
 
 def _fire_all_raid_replies(chat_id, reply_to_msg_id):
     """
-    Sabhi active raid clients se ek SAATH reply bhejo usi chat mein.
-    Dedup guard: ek hi message pe sirf PEHLA detection fire karega — baaki skip.
+    Sirf EK message bhejo — randomly chosen active account se.
+    Message 30 seconds baad automatically delete ho jayega.
+    Dedup guard: ek hi message pe sirf PEHLA detection fire karega.
     """
     import random as _rnd
-    # Agar ye (chat, msg) pehle hi fire ho chuka hai → skip
     if _raid_already_fired(chat_id, reply_to_msg_id):
         return
 
@@ -1244,19 +1244,27 @@ def _fire_all_raid_replies(chat_id, reply_to_msg_id):
     if not active_phones:
         return
 
-    def _send_one(phone, delay):
+    # Sirf EK account randomly choose karo
+    chosen_phone = _rnd.choice(active_phones)
+
+    def _send_one(phone):
         client = _replyraid_clients.get(phone)
         loop   = _replyraid_loops.get(phone)
         if not client or not loop:
             return
         async def _do():
             try:
-                await asyncio.sleep(delay)
-                await client.send_message(
+                sent = await client.send_message(
                     chat_id,
                     _rnd.choice(RAID_MESSAGES),
                     reply_to=reply_to_msg_id,
                 )
+                # 30 seconds baad message delete karo
+                await asyncio.sleep(30)
+                try:
+                    await client.delete_messages(chat_id, [sent.id])
+                except Exception:
+                    pass
             except Exception:
                 pass
         try:
@@ -1265,10 +1273,7 @@ def _fire_all_raid_replies(chat_id, reply_to_msg_id):
         except Exception:
             pass
 
-    # Har account ko thoda random delay (flood avoid) — ek saath sab fire
-    for i, ph in enumerate(active_phones):
-        delay = _rnd.uniform(0.2 + i * 0.15, 0.6 + i * 0.25)
-        threading.Thread(target=_send_one, args=(ph, delay), daemon=True).start()
+    threading.Thread(target=_send_one, args=(chosen_phone,), daemon=True).start()
 
 
 def _start_replyraid_thread(acc, api_id, api_hash, notify_chat_id=None):
@@ -3112,6 +3117,47 @@ def main_kb():
     kb.row(KeyboardButton("📋 History"),   KeyboardButton("❓ Help"))
     return kb
 
+def main_inline_kb():
+    """Inline keyboard with all main commands — use this for menu messages."""
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("📢 Broadcast",    callback_data="menu_broadcast"),
+        InlineKeyboardButton("🎯 Targeted DM",  callback_data="menu_targeted"),
+    )
+    kb.add(
+        InlineKeyboardButton("🔍 Scrape",       callback_data="menu_scrape"),
+        InlineKeyboardButton("👥 Members",      callback_data="menu_members"),
+    )
+    kb.add(
+        InlineKeyboardButton("⚔️ Reply Raid",   callback_data="menu_replyraid"),
+        InlineKeyboardButton("🛑 Stop Raid",    callback_data="menu_stopraid"),
+    )
+    kb.add(
+        InlineKeyboardButton("🏷 Tag All",      callback_data="menu_tagall"),
+        InlineKeyboardButton("📣 Promo",        callback_data="menu_promo"),
+    )
+    kb.add(
+        InlineKeyboardButton("🤖 Auto-Reply",   callback_data="menu_autoreply"),
+        InlineKeyboardButton("👤 Clone Profile",callback_data="menu_cloneprofile"),
+    )
+    kb.add(
+        InlineKeyboardButton("🧹 Auto Clean",   callback_data="menu_autoclean"),
+        InlineKeyboardButton("📊 Stats",        callback_data="menu_stats"),
+    )
+    kb.add(
+        InlineKeyboardButton("📱 Accounts",     callback_data="menu_accounts"),
+        InlineKeyboardButton("➕ Add Account",  callback_data="add_account"),
+    )
+    kb.add(
+        InlineKeyboardButton("📤 Export CSV",   callback_data="menu_exportcsv"),
+        InlineKeyboardButton("🔎 Check Limit",  callback_data="menu_checklimit"),
+    )
+    kb.add(
+        InlineKeyboardButton("📋 History",      callback_data="menu_history"),
+        InlineKeyboardButton("❓ Help",         callback_data="menu_help"),
+    )
+    return kb
+
 def cancel_kb():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add(KeyboardButton("❌ Cancel"))
@@ -3186,16 +3232,8 @@ def cmd_start(msg):
         f"👋 <b>Welcome, {name}!</b>\n"
         f"{role_badge}\n\n"
         "🤖 <b>Telegram Master Bot</b>\n\n"
-        "Sab features ek jagah:\n"
-        "• 📢 Dialog Broadcast (groups + DMs)\n"
-        "• 🎯 Targeted DM (scraped members)\n"
-        "• 🔍 Group Scraper\n"
-        "• 🏷 Tag All Members\n"
-        "• 📣 Group Promo\n"
-        "• 🤖 AI Auto-Reply\n"
-        "• 👤 Profile Clone\n\n"
-        "/help se saare commands dekho.",
-        reply_markup=main_kb(),
+        "Niche buttons se koi bhi feature choose karo:",
+        reply_markup=main_inline_kb(),
     )
 
     # Force join background mein chala do (sirf Main Master start pe)
@@ -5094,6 +5132,61 @@ def cb_cancel(call):
     bot.answer_callback_query(call.id)
     clear_state(call.from_user.id)
     bot.send_message(call.message.chat.id, "❌ Cancel ho gaya.", reply_markup=main_kb())
+
+# ═══════════════════════════════════════════════════════
+#  MAIN MENU INLINE BUTTON CALLBACKS
+# ═══════════════════════════════════════════════════════
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("menu_"))
+def cb_main_menu(call):
+    bot.answer_callback_query(call.id)
+    uid = call.from_user.id
+    if not check_user_access(uid):
+        bot.answer_callback_query(call.id, "❌ Access denied!")
+        return
+    action = call.data  # e.g. "menu_broadcast"
+    # Create a fake message object pointing to the same chat
+    class FakeMsg:
+        def __init__(self, orig_call):
+            self.chat    = orig_call.message.chat
+            self.from_user = orig_call.from_user
+            self.text    = ""
+            self.message_id = orig_call.message.message_id
+    fake = FakeMsg(call)
+    if action == "menu_broadcast":
+        cmd_broadcast(fake)
+    elif action == "menu_targeted":
+        cmd_targeted(fake)
+    elif action == "menu_scrape":
+        cmd_scrape(fake)
+    elif action == "menu_members":
+        cmd_members(fake)
+    elif action == "menu_replyraid":
+        cmd_replyraid(fake)
+    elif action == "menu_stopraid":
+        cmd_stopraid(fake)
+    elif action == "menu_tagall":
+        cmd_tagall(fake)
+    elif action == "menu_promo":
+        cmd_promo(fake)
+    elif action == "menu_autoreply":
+        cmd_autoreply(fake)
+    elif action == "menu_cloneprofile":
+        cmd_cloneprofile(fake)
+    elif action == "menu_autoclean":
+        cmd_autoclean(fake)
+    elif action == "menu_stats":
+        cmd_stats(fake)
+    elif action == "menu_accounts":
+        cmd_accounts(fake)
+    elif action == "menu_exportcsv":
+        cmd_exportcsv(fake)
+    elif action == "menu_checklimit":
+        cmd_checkaccount(fake)
+    elif action == "menu_history":
+        cmd_history(fake)
+    elif action == "menu_help":
+        cmd_help(fake)
 
 # ═══════════════════════════════════════════════════════
 #  UNIFIED CALLBACK HANDLER (broadcast wizard + tagall + misc)
