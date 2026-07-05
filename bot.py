@@ -66,6 +66,7 @@ from datetime import datetime, timezone
 missing = []
 try:
     from telethon import TelegramClient, events
+    from telethon.sessions import StringSession
     from telethon.errors import (
         FloodWaitError, PhoneCodeExpiredError, PhoneCodeInvalidError,
         SessionPasswordNeededError, UserBannedInChannelError,
@@ -365,8 +366,31 @@ def _set_wal_mode(phone):
     except Exception:
         pass
 
-def get_client(phone, api_id, api_hash):
+def get_client(phone, api_id, api_hash, session_string=None):
+    """
+    session_string diya toh StringSession use karo (Heroku/cloud restart safe).
+    Nahi diya toh file-based session use karo.
+    """
     safe = phone.replace("+", "").replace(" ", "")
+    if not session_string:
+        # data.json se session_string dhundho
+        try:
+            d = load()
+            for acc in d.get("accounts", []):
+                if acc["phone"] == phone and acc.get("session_string"):
+                    session_string = acc["session_string"]
+                    break
+        except Exception:
+            pass
+    if session_string:
+        return TelegramClient(
+            StringSession(session_string),
+            api_id, api_hash,
+            connection_retries=5,
+            retry_delay=2,
+            request_retries=3,
+            flood_sleep_threshold=20,
+        )
     _set_wal_mode(phone)
     return TelegramClient(
         os.path.join(SESSION_DIR, safe),
@@ -378,8 +402,19 @@ def get_client(phone, api_id, api_hash):
     )
 
 def session_exists(phone):
+    """Check karo: session file OR session_string (StringSession) exist karta hai."""
     safe = phone.replace("+", "").replace(" ", "")
-    return os.path.exists(os.path.join(SESSION_DIR, safe + ".session"))
+    if os.path.exists(os.path.join(SESSION_DIR, safe + ".session")):
+        return True
+    # StringSession check karo data.json mein
+    try:
+        d = load()
+        for acc in d.get("accounts", []):
+            if acc["phone"] == phone and acc.get("session_string"):
+                return True
+    except Exception:
+        pass
+    return False
 
 def active_accounts(cfg_or_none=None):
     if cfg_or_none is None:
@@ -5994,7 +6029,10 @@ def handle_message(msg):
                 )
                 me   = loop.run_until_complete(client.get_me())
                 name = f"{getattr(me,'first_name','') or ''} {getattr(me,'last_name','') or ''}".strip()
-                entry = {"phone": phone, "label": name or phone, "verified": True, "active": True}
+                # StringSession save karo — Heroku restart ke baad bhi kaam karega
+                sess_str = client.session.save()
+                entry = {"phone": phone, "label": name or phone, "verified": True, "active": True,
+                         "session_string": sess_str}
                 d2["accounts"] = [a for a in d2["accounts"] if a["phone"] != phone]
                 d2["accounts"].append(entry)
                 # Account owner record karo
@@ -6012,7 +6050,7 @@ def handle_message(msg):
                     f"👤 Name: <b>{name}</b>\n"
                     f"🤖 Userbot: <b>AUTO-START ho raha hai...</b>\n"
                     f"🔑 Owner: <code>{uid}</code>\n\n"
-                    f"Ab yeh account automatic /replyraid mein participate karega!",
+                    f"✅ Session saved — bot restart ke baad bhi dobara login nahi karna!",
                     reply_markup=main_kb(), parse_mode="HTML")
                 clear_state(uid)
             except SessionPasswordNeededError:
@@ -6048,7 +6086,10 @@ def handle_message(msg):
                 loop.run_until_complete(client.sign_in(password=password))
                 me   = loop.run_until_complete(client.get_me())
                 name = f"{getattr(me,'first_name','') or ''} {getattr(me,'last_name','') or ''}".strip()
-                entry = {"phone": phone, "label": name or phone, "verified": True, "active": True}
+                # StringSession save karo
+                sess_str = client.session.save()
+                entry = {"phone": phone, "label": name or phone, "verified": True, "active": True,
+                         "session_string": sess_str}
                 d2["accounts"] = [a for a in d2["accounts"] if a["phone"] != phone]
                 d2["accounts"].append(entry)
                 # Account owner record karo
@@ -6066,7 +6107,7 @@ def handle_message(msg):
                     f"👤 Name: <b>{name}</b>\n"
                     f"🤖 Userbot: <b>AUTO-START ho raha hai...</b>\n"
                     f"🔑 Owner: <code>{uid}</code>\n\n"
-                    f"Ab yeh account automatic /replyraid mein participate karega!",
+                    f"✅ Session saved — bot restart ke baad bhi dobara login nahi karna!",
                     reply_markup=main_kb(), parse_mode="HTML")
                 clear_state(uid)
             except Exception as e:
@@ -6444,10 +6485,12 @@ async def add_account_otp():
             await client.sign_in(password=tfa)
         me   = await client.get_me()
         name = f"{me.first_name or ''} {me.last_name or ''}".strip()
+        sess_str = client.session.save()
         data["accounts"].append({
             "id": gen_id(), "phone": phone, "label": label or name or phone,
             "name": name, "active": True, "verified": True,
             "addedAt": datetime.now().isoformat(),
+            "session_string": sess_str,
         })
         save(data)
         ok(f"Account add! Name: {name}  Phone: {phone}")
