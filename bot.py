@@ -162,136 +162,97 @@ def hdr(t):
 #  DATA — JSON (accounts, config, history)
 # ═══════════════════════════════════════════════════════
 
+
 # ═══════════════════════════════════════════════════════
-#  HEROKU CONFIG VARS — Account Persistence
-#  HEROKU_API_KEY aur HEROKU_APP_NAME set karo Heroku dashboard mein
+#  MONGODB — Persistent Account Storage
+#  MONGODB_URI ko Heroku/Railway Config Vars mein set karo
+#  Free Atlas cluster: mongodb.com/atlas/database
 # ═══════════════════════════════════════════════════════
 
-def _heroku_get_all_vars():
-    """Heroku se saare Config Vars fetch karo."""
+_mongo_client = None
+_mongo_db     = None
+
+def _get_mongo_db():
+    """MongoDB connection return karo (singleton, thread-safe)."""
+    global _mongo_client, _mongo_db
+    if _mongo_db is not None:
+        return _mongo_db
+    uri = os.environ.get("MONGODB_URI", "")
+    if not uri:
+        return None
     try:
-        api_key  = os.environ.get("HEROKU_API_KEY", "")
-        app_name = os.environ.get("HEROKU_APP_NAME", "")
-        if not api_key or not app_name:
-            return {}
-        import urllib.request
-        req = urllib.request.Request(
-            f"https://api.heroku.com/apps/{app_name}/config-vars",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Accept": "application/vnd.heroku+json; version=3",
-            }
+        from pymongo import MongoClient
+        _mongo_client = MongoClient(uri, serverSelectionTimeoutMS=5000)
+        _mongo_client.admin.command("ping")   # connection test
+        _mongo_db = _mongo_client["tg_master"]
+        return _mongo_db
+    except Exception as e:
+        return None
+
+def _mongo_save_account(acc, owner_id=""):
+    """Ek account (with session_string) MongoDB mein save/update karo."""
+    try:
+        db = _get_mongo_db()
+        if db is None:
+            return
+        acc_copy = dict(acc)
+        acc_copy["owner_id"] = str(owner_id) if owner_id else acc_copy.get("owner_id", "")
+        db["accounts"].replace_one(
+            {"phone": acc_copy["phone"]},
+            acc_copy,
+            upsert=True,
         )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            return json.loads(resp.read().decode())
-    except Exception:
-        return {}
-
-def _heroku_set_var(key, value):
-    """Heroku mein ek Config Var set karo."""
-    try:
-        api_key  = os.environ.get("HEROKU_API_KEY", "")
-        app_name = os.environ.get("HEROKU_APP_NAME", "")
-        if not api_key or not app_name:
-            return False
-        import urllib.request
-        body = json.dumps({key: value}).encode()
-        req  = urllib.request.Request(
-            f"https://api.heroku.com/apps/{app_name}/config-vars",
-            data=body,
-            method="PATCH",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Accept":         "application/vnd.heroku+json; version=3",
-                "Content-Type":   "application/json",
-            }
-        )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            return resp.status == 200
-    except Exception:
-        return False
-
-def _heroku_delete_var(key):
-    """Heroku se ek Config Var delete karo."""
-    try:
-        api_key  = os.environ.get("HEROKU_API_KEY", "")
-        app_name = os.environ.get("HEROKU_APP_NAME", "")
-        if not api_key or not app_name:
-            return False
-        import urllib.request
-        body = json.dumps({key: None}).encode()
-        req  = urllib.request.Request(
-            f"https://api.heroku.com/apps/{app_name}/config-vars",
-            data=body,
-            method="PATCH",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Accept":         "application/vnd.heroku+json; version=3",
-                "Content-Type":   "application/json",
-            }
-        )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            return resp.status == 200
-    except Exception:
-        return False
-
-def _restore_accounts_from_heroku(d):
-    """
-    Heroku Config Vars mein stored accounts ko data.json mein merge karo.
-    TG_ACC_<phone_safe> = JSON string of account dict
-    """
-    try:
-        hvars = _heroku_get_all_vars()
-        if not hvars:
-            return d
-        existing_phones = {a["phone"] for a in d.get("accounts", [])}
-        owners = d.setdefault("account_owners", {})
-        added = 0
-        for k, v in hvars.items():
-            if not k.startswith("TG_ACC_"):
-                continue
-            try:
-                acc = json.loads(v)
-                phone = acc.get("phone", "")
-                if not phone:
-                    continue
-                if phone not in existing_phones:
-                    d.setdefault("accounts", []).append(acc)
-                    existing_phones.add(phone)
-                    # owner restore
-                    owner = acc.get("owner_id")
-                    if owner:
-                        owners[phone] = str(owner)
-                    added += 1
-                else:
-                    # session_string update karo agar nahi hai
-                    for a in d["accounts"]:
-                        if a["phone"] == phone and not a.get("session_string") and acc.get("session_string"):
-                            a["session_string"] = acc["session_string"]
-            except Exception:
-                pass
-        return d
-    except Exception:
-        return d
-
-def _push_account_to_heroku(acc):
-    """Account ko Heroku Config Var mein save karo — restart ke baad bhi rahega."""
-    try:
-        phone_safe = acc["phone"].replace("+", "").replace(" ", "")
-        key = f"TG_ACC_{phone_safe}"
-        _heroku_set_var(key, json.dumps(acc, ensure_ascii=False))
     except Exception:
         pass
 
-def _remove_account_from_heroku(phone):
-    """Account ko Heroku Config Var se delete karo."""
+def _mongo_delete_account(phone):
+    """MongoDB se account delete karo."""
     try:
-        phone_safe = phone.replace("+", "").replace(" ", "")
-        _heroku_delete_var(f"TG_ACC_{phone_safe}")
+        db = _get_mongo_db()
+        if db is None:
+            return
+        db["accounts"].delete_one({"phone": phone})
     except Exception:
         pass
+
+def _mongo_load_accounts():
+    """MongoDB se saare accounts load karo."""
+    try:
+        db = _get_mongo_db()
+        if db is None:
+            return []
+        return list(db["accounts"].find({}, {"_id": 0}))
+    except Exception:
+        return []
+
+def _mongo_save_config(cfg_dict):
+    """Bot config MongoDB mein save karo."""
+    try:
+        db = _get_mongo_db()
+        if db is None:
+            return
+        db["config"].replace_one({"_id": "main"}, {"_id": "main", **cfg_dict}, upsert=True)
+    except Exception:
+        pass
+
+def _mongo_load_config():
+    """MongoDB se config load karo."""
+    try:
+        db = _get_mongo_db()
+        if db is None:
+            return None
+        doc = db["config"].find_one({"_id": "main"}, {"_id": 0})
+        return doc
+    except Exception:
+        return None
 
 def load():
+    """
+    Data load karo — priority order:
+    1. Local data.json (agar exist karta hai)
+    2. MongoDB (agar MONGODB_URI set hai) — restart-safe!
+    3. Env vars (BOT_TOKEN, API_ID, API_HASH, ADMIN_ID)
+    """
     d = None
     if os.path.exists(DATA_FILE):
         try:
@@ -320,7 +281,7 @@ def load():
             "history":  [],
             "templates": [],
         }
-    # Config fields migration
+    # Config fields migration / defaults
     cfg = d.setdefault("config", {})
     cfg.setdefault("main_master_id", 0)
     cfg.setdefault("user_masters", [])
@@ -330,15 +291,25 @@ def load():
     cfg.setdefault("promo_text", "")
     cfg.setdefault("promo_link", "")
     d.setdefault("account_owners", {})
-    # Heroku Config Vars se accounts restore karo (agar file nahi hai ya accounts missing hain)
+    # ── MongoDB se accounts restore karo (Heroku restart pe file wipe hoti hai) ──
     if not d.get("accounts"):
-        d = _restore_accounts_from_heroku(d)
-    # Config fields from env vars (Heroku)
+        mongo_accs = _mongo_load_accounts()
+        if mongo_accs:
+            existing = {a["phone"] for a in d["accounts"]}
+            owners   = d.setdefault("account_owners", {})
+            for acc in mongo_accs:
+                if acc.get("phone") and acc["phone"] not in existing:
+                    d["accounts"].append(acc)
+                    existing.add(acc["phone"])
+                    owner = acc.get("owner_id")
+                    if owner:
+                        owners[acc["phone"]] = str(owner)
+    # ── Env vars se config load karo (agar data.json mein nahi hai) ────────────
     for env_key, cfg_key, cast in [
-        ("BOT_TOKEN",  "bot_token",  str),
-        ("API_ID",     "api_id",     int),
-        ("API_HASH",   "api_hash",   str),
-        ("ADMIN_ID",   "admin_ids",  None),
+        ("BOT_TOKEN", "bot_token", str),
+        ("API_ID",    "api_id",    int),
+        ("API_HASH",  "api_hash",  str),
+        ("ADMIN_ID",  "admin_ids", None),
     ]:
         val = os.environ.get(env_key, "")
         if val:
@@ -356,17 +327,16 @@ def save(data):
     os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
     with open(DATA_FILE, "w") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
-    # Accounts bhi Heroku mein push karo (fire-and-forget)
-    if os.environ.get("HEROKU_API_KEY") and os.environ.get("HEROKU_APP_NAME"):
-        def _bg():
-            owners = data.get("account_owners", {})
-            for acc in data.get("accounts", []):
-                if acc.get("session_string"):
-                    acc_copy = dict(acc)
-                    phone = acc_copy.get("phone", "")
-                    acc_copy["owner_id"] = owners.get(phone, "")
-                    _push_account_to_heroku(acc_copy)
-        threading.Thread(target=_bg, daemon=True).start()
+    # MongoDB mein bhi save karo — fire-and-forget background thread
+    def _bg():
+        owners = data.get("account_owners", {})
+        for acc in data.get("accounts", []):
+            if acc.get("session_string"):
+                acc_copy = dict(acc)
+                phone = acc_copy.get("phone", "")
+                acc_copy["owner_id"] = owners.get(phone, acc_copy.get("owner_id", ""))
+                _mongo_save_account(acc_copy, owner_id=acc_copy["owner_id"])
+    threading.Thread(target=_bg, daemon=True, name="mongo-save").start()
 
 def load_cfg():
     """File-2 compat: returns flat dict with config fields + accounts list."""
@@ -3585,7 +3555,8 @@ def cmd_status(msg):
         msg,
         f"📊 <b>System Status</b>\n\n"
         f"Bot Token: {bot_ok}\n"
-        f"API Credentials: {api_ok}\n\n"
+        f"API Credentials: {api_ok}\n"
+        f"💾 MongoDB: {'✅ Connected' if _get_mongo_db() is not None else '⚠️ Not connected (MONGODB_URI set karo)'}\n\n"
         f"👤 Accounts: {len(accs)} (Active: {active})\n\n"
         f"📈 Dialog Broadcasts: {len(d['history'])}\n\n"
         f"🎯 Broadcast Modes:\n"
