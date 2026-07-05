@@ -162,48 +162,211 @@ def hdr(t):
 #  DATA — JSON (accounts, config, history)
 # ═══════════════════════════════════════════════════════
 
+# ═══════════════════════════════════════════════════════
+#  HEROKU CONFIG VARS — Account Persistence
+#  HEROKU_API_KEY aur HEROKU_APP_NAME set karo Heroku dashboard mein
+# ═══════════════════════════════════════════════════════
+
+def _heroku_get_all_vars():
+    """Heroku se saare Config Vars fetch karo."""
+    try:
+        api_key  = os.environ.get("HEROKU_API_KEY", "")
+        app_name = os.environ.get("HEROKU_APP_NAME", "")
+        if not api_key or not app_name:
+            return {}
+        import urllib.request
+        req = urllib.request.Request(
+            f"https://api.heroku.com/apps/{app_name}/config-vars",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Accept": "application/vnd.heroku+json; version=3",
+            }
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return json.loads(resp.read().decode())
+    except Exception:
+        return {}
+
+def _heroku_set_var(key, value):
+    """Heroku mein ek Config Var set karo."""
+    try:
+        api_key  = os.environ.get("HEROKU_API_KEY", "")
+        app_name = os.environ.get("HEROKU_APP_NAME", "")
+        if not api_key or not app_name:
+            return False
+        import urllib.request
+        body = json.dumps({key: value}).encode()
+        req  = urllib.request.Request(
+            f"https://api.heroku.com/apps/{app_name}/config-vars",
+            data=body,
+            method="PATCH",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Accept":         "application/vnd.heroku+json; version=3",
+                "Content-Type":   "application/json",
+            }
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+def _heroku_delete_var(key):
+    """Heroku se ek Config Var delete karo."""
+    try:
+        api_key  = os.environ.get("HEROKU_API_KEY", "")
+        app_name = os.environ.get("HEROKU_APP_NAME", "")
+        if not api_key or not app_name:
+            return False
+        import urllib.request
+        body = json.dumps({key: None}).encode()
+        req  = urllib.request.Request(
+            f"https://api.heroku.com/apps/{app_name}/config-vars",
+            data=body,
+            method="PATCH",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Accept":         "application/vnd.heroku+json; version=3",
+                "Content-Type":   "application/json",
+            }
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+def _restore_accounts_from_heroku(d):
+    """
+    Heroku Config Vars mein stored accounts ko data.json mein merge karo.
+    TG_ACC_<phone_safe> = JSON string of account dict
+    """
+    try:
+        hvars = _heroku_get_all_vars()
+        if not hvars:
+            return d
+        existing_phones = {a["phone"] for a in d.get("accounts", [])}
+        owners = d.setdefault("account_owners", {})
+        added = 0
+        for k, v in hvars.items():
+            if not k.startswith("TG_ACC_"):
+                continue
+            try:
+                acc = json.loads(v)
+                phone = acc.get("phone", "")
+                if not phone:
+                    continue
+                if phone not in existing_phones:
+                    d.setdefault("accounts", []).append(acc)
+                    existing_phones.add(phone)
+                    # owner restore
+                    owner = acc.get("owner_id")
+                    if owner:
+                        owners[phone] = str(owner)
+                    added += 1
+                else:
+                    # session_string update karo agar nahi hai
+                    for a in d["accounts"]:
+                        if a["phone"] == phone and not a.get("session_string") and acc.get("session_string"):
+                            a["session_string"] = acc["session_string"]
+            except Exception:
+                pass
+        return d
+    except Exception:
+        return d
+
+def _push_account_to_heroku(acc):
+    """Account ko Heroku Config Var mein save karo — restart ke baad bhi rahega."""
+    try:
+        phone_safe = acc["phone"].replace("+", "").replace(" ", "")
+        key = f"TG_ACC_{phone_safe}"
+        _heroku_set_var(key, json.dumps(acc, ensure_ascii=False))
+    except Exception:
+        pass
+
+def _remove_account_from_heroku(phone):
+    """Account ko Heroku Config Var se delete karo."""
+    try:
+        phone_safe = phone.replace("+", "").replace(" ", "")
+        _heroku_delete_var(f"TG_ACC_{phone_safe}")
+    except Exception:
+        pass
+
 def load():
+    d = None
     if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE) as f:
                 d = json.load(f)
-                # Migration: naye config fields add karo agar missing hain
-                cfg = d.setdefault("config", {})
-                cfg.setdefault("main_master_id", 0)
-                cfg.setdefault("user_masters", [])
-                cfg.setdefault("force_join_groups", [])
-                cfg.setdefault("music_bot_usernames", [])
-                cfg.setdefault("blacklist_groups", [])
-                cfg.setdefault("promo_text", "")
-                cfg.setdefault("promo_link", "")
-                d.setdefault("account_owners", {})   # phone -> telegram_user_id
-                return d
         except Exception:
-            pass
-    return {
-        "config": {
-            "bot_token": "",
-            "api_id": 0,
-            "api_hash": "",
-            "admin_ids": [],
-            "main_master_id": 0,           # MAIN MASTER: all access
-            "user_masters": [],            # USER MASTERS: limited access
-            "force_join_groups": [],       # Bot start pe force join karne wale groups
-            "music_bot_usernames": [],     # Scrape se pehle group mein add karne wale bots
-            "blacklist_groups": [],        # Blacklisted groups (na scrape, na join)
-            "promo_text": "",
-            "promo_link": "",
-        },
-        "accounts": [],
-        "account_owners": {},              # phone -> telegram_user_id
-        "targets":  [],
-        "history":  [],
-        "templates": [],
-    }
+            d = None
+    if d is None:
+        d = {
+            "config": {
+                "bot_token": "",
+                "api_id": 0,
+                "api_hash": "",
+                "admin_ids": [],
+                "main_master_id": 0,
+                "user_masters": [],
+                "force_join_groups": [],
+                "music_bot_usernames": [],
+                "blacklist_groups": [],
+                "promo_text": "",
+                "promo_link": "",
+            },
+            "accounts": [],
+            "account_owners": {},
+            "targets":  [],
+            "history":  [],
+            "templates": [],
+        }
+    # Config fields migration
+    cfg = d.setdefault("config", {})
+    cfg.setdefault("main_master_id", 0)
+    cfg.setdefault("user_masters", [])
+    cfg.setdefault("force_join_groups", [])
+    cfg.setdefault("music_bot_usernames", [])
+    cfg.setdefault("blacklist_groups", [])
+    cfg.setdefault("promo_text", "")
+    cfg.setdefault("promo_link", "")
+    d.setdefault("account_owners", {})
+    # Heroku Config Vars se accounts restore karo (agar file nahi hai ya accounts missing hain)
+    if not d.get("accounts"):
+        d = _restore_accounts_from_heroku(d)
+    # Config fields from env vars (Heroku)
+    for env_key, cfg_key, cast in [
+        ("BOT_TOKEN",  "bot_token",  str),
+        ("API_ID",     "api_id",     int),
+        ("API_HASH",   "api_hash",   str),
+        ("ADMIN_ID",   "admin_ids",  None),
+    ]:
+        val = os.environ.get(env_key, "")
+        if val:
+            if cfg_key == "admin_ids" and not cfg.get("admin_ids"):
+                try: cfg["admin_ids"] = [int(v.strip()) for v in val.split(",") if v.strip()]
+                except Exception: pass
+            elif cast == int:
+                try: cfg[cfg_key] = int(val)
+                except Exception: pass
+            elif cast == str and not cfg.get(cfg_key):
+                cfg[cfg_key] = val
+    return d
 
 def save(data):
+    os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
     with open(DATA_FILE, "w") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
+    # Accounts bhi Heroku mein push karo (fire-and-forget)
+    if os.environ.get("HEROKU_API_KEY") and os.environ.get("HEROKU_APP_NAME"):
+        def _bg():
+            owners = data.get("account_owners", {})
+            for acc in data.get("accounts", []):
+                if acc.get("session_string"):
+                    acc_copy = dict(acc)
+                    phone = acc_copy.get("phone", "")
+                    acc_copy["owner_id"] = owners.get(phone, "")
+                    _push_account_to_heroku(acc_copy)
+        threading.Thread(target=_bg, daemon=True).start()
 
 def load_cfg():
     """File-2 compat: returns flat dict with config fields + accounts list."""
