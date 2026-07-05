@@ -1233,9 +1233,13 @@ def _notify_admin(text):
 def _fire_all_raid_replies(chat_id, reply_to_msg_id):
     """
     Sabhi active raid clients se ek SAATH reply bhejo usi chat mein.
-    Ye tab call hota hai jab koi bhi ek account target ka message dekhe.
+    Dedup guard: ek hi message pe sirf PEHLA detection fire karega — baaki skip.
     """
     import random as _rnd
+    # Agar ye (chat, msg) pehle hi fire ho chuka hai → skip
+    if _raid_already_fired(chat_id, reply_to_msg_id):
+        return
+
     active_phones = [ph for ph, ok in list(_replyraid_active.items()) if ok]
     if not active_phones:
         return
@@ -1261,7 +1265,7 @@ def _fire_all_raid_replies(chat_id, reply_to_msg_id):
         except Exception:
             pass
 
-    # Sabhi accounts ko slightly random delay ke saath fire karo (flood avoid)
+    # Har account ko thoda random delay (flood avoid) — ek saath sab fire
     for i, ph in enumerate(active_phones):
         delay = _rnd.uniform(0.2 + i * 0.15, 0.6 + i * 0.25)
         threading.Thread(target=_send_one, args=(ph, delay), daemon=True).start()
@@ -1385,6 +1389,68 @@ def _ensure_replyraid_running(uid, notify_chat_id=None):
 def _stop_all_replyraid():
     for phone in list(_replyraid_active.keys()):
         _stop_replyraid_thread(phone)
+
+
+# ─── DEDUP: ek message pe ek hi baar fire ho ─────────────────────────────────
+_raid_fired_msgs = {}   # (chat_id, msg_id) -> timestamp
+
+def _raid_already_fired(chat_id, msg_id):
+    """Return True if this (chat, msg) was already fired; else mark and return False."""
+    import time
+    key = (chat_id, msg_id)
+    now = time.time()
+    # Purane entries clean karo (> 30s)
+    for k in list(_raid_fired_msgs.keys()):
+        if now - _raid_fired_msgs[k] > 30:
+            del _raid_fired_msgs[k]
+    if key in _raid_fired_msgs:
+        return True
+    _raid_fired_msgs[key] = now
+    return False
+
+
+def _auto_start_userbot(acc, notify_chat_id=None):
+    """
+    Naya account add hone ke baad ya bot startup pe automatically
+    Telethon userbot watcher thread shuru karo.
+    Agar watcher pehle se chal raha hai toh kuch nahi karo.
+    """
+    d        = load()
+    cfg      = d["config"]
+    api_id   = cfg.get("api_id", 0)
+    api_hash = cfg.get("api_hash", "")
+    if not api_id or not api_hash:
+        return False
+    if not session_exists(acc["phone"]):
+        return False
+    return _start_replyraid_thread(acc, api_id, api_hash, notify_chat_id)
+
+
+def _startup_all_userbots():
+    """
+    Bot start hone pe sab active accounts ka watcher thread shuru karo.
+    Ye accounts 'userbot' ki tarah hamesha connected rahenge.
+    """
+    def _run():
+        import time
+        time.sleep(3)   # bot polling settle hone do
+        d    = load()
+        cfg  = d["config"]
+        accs = [a for a in d["accounts"] if a.get("active") and a.get("verified")]
+        if not accs:
+            return
+        ok_count = 0
+        for acc in accs:
+            if _auto_start_userbot(acc):
+                ok_count += 1
+            time.sleep(0.5)   # throttle
+        if ok_count:
+            _notify_admin(
+                f"🤖 <b>Userbot Auto-Start</b>\n"
+                f"✅ {ok_count}/{len(accs)} accounts connected & watching!\n"
+                f"Ab /replyraid se kisi pe bhi raid chalaao."
+            )
+    threading.Thread(target=_run, daemon=True, name="userbot-startup").start()
 
 
 
@@ -5827,12 +5893,20 @@ def handle_message(msg):
                 # Account owner record karo
                 d2.setdefault("account_owners", {})[phone] = str(uid)
                 save(d2)
+                # ── Automatic Userbot: naya account turant watcher thread shuru kare ──
+                threading.Thread(
+                    target=_auto_start_userbot,
+                    args=(entry, msg.chat.id),
+                    daemon=True
+                ).start()
                 bot.send_message(msg.chat.id,
                     f"✅ <b>Account add ho gaya!</b>\n\n"
                     f"📱 Phone: <code>{phone}</code>\n"
-                    f"👤 Name: {name}\n"
-                    f"🔑 Owner: <code>{uid}</code>",
-                    reply_markup=main_kb())
+                    f"👤 Name: <b>{name}</b>\n"
+                    f"🤖 Userbot: <b>AUTO-START ho raha hai...</b>\n"
+                    f"🔑 Owner: <code>{uid}</code>\n\n"
+                    f"Ab yeh account automatic /replyraid mein participate karega!",
+                    reply_markup=main_kb(), parse_mode="HTML")
                 clear_state(uid)
             except SessionPasswordNeededError:
                 set_state(uid, "add_2fa", {"phone": phone})
@@ -5873,12 +5947,20 @@ def handle_message(msg):
                 # Account owner record karo
                 d2.setdefault("account_owners", {})[phone] = str(uid)
                 save(d2)
+                # ── Automatic Userbot: naya account turant watcher thread shuru kare ──
+                threading.Thread(
+                    target=_auto_start_userbot,
+                    args=(entry, msg.chat.id),
+                    daemon=True
+                ).start()
                 bot.send_message(msg.chat.id,
                     f"✅ <b>Account add ho gaya! (2FA)</b>\n\n"
                     f"📱 Phone: <code>{phone}</code>\n"
-                    f"👤 Name: {name}\n"
-                    f"🔑 Owner: <code>{uid}</code>",
-                    reply_markup=main_kb())
+                    f"👤 Name: <b>{name}</b>\n"
+                    f"🤖 Userbot: <b>AUTO-START ho raha hai...</b>\n"
+                    f"🔑 Owner: <code>{uid}</code>\n\n"
+                    f"Ab yeh account automatic /replyraid mein participate karega!",
+                    reply_markup=main_kb(), parse_mode="HTML")
                 clear_state(uid)
             except Exception as e:
                 bot.send_message(msg.chat.id, f"❌ 2FA Error: {e}")
@@ -6546,13 +6628,15 @@ def _start_bot_polling():
     try:
         r = requests.get(f"https://api.telegram.org/bot{token}/getMe", timeout=10).json()
         if r.get("ok"):
-            info = r["result"]
-            print(f"   Bot : {info['first_name']} (@{info.get('username','?')})")
+            binfo = r["result"]
+            print(f"   Bot : {binfo['first_name']} (@{binfo.get('username','?')})")
     except Exception:
         pass
     print(f"   Admin IDs : {adm_ids}")
     print(f"   Accounts  : {active}/{len(accs)} active")
     print(f"   Mode      : {'Heroku/Server' if not sys.stdin.isatty() else 'Local'}\n")
+    # ── Sabhi existing accounts ko userbot ki tarah auto-start karo ──────────
+    _startup_all_userbots()
     bot.infinity_polling(timeout=20, long_polling_timeout=10)
 
 
