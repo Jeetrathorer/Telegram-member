@@ -165,7 +165,7 @@ def hdr(t):
 
 # ═══════════════════════════════════════════════════════
 #  MONGODB — Persistent Account Storage
-#  MONGODB_URI ko Heroku/Railway Config Vars mein set karo
+#  Deploy ke baad /setmongouri command se URI set karo
 #  Free Atlas cluster: mongodb.com/atlas/database
 # ═══════════════════════════════════════════════════════
 
@@ -188,6 +188,62 @@ def _get_mongo_db():
         return _mongo_db
     except Exception as e:
         return None
+
+def _heroku_save_config_var(key, value):
+    """Heroku Config Var set karo — HEROKU_API_KEY + HEROKU_APP_NAME chahiye."""
+    try:
+        api_key  = os.environ.get("HEROKU_API_KEY", "")
+        app_name = os.environ.get("HEROKU_APP_NAME", "")
+        if not api_key or not app_name:
+            return False
+        import urllib.request
+        body = json.dumps({key: value}).encode()
+        req  = urllib.request.Request(
+            f"https://api.heroku.com/apps/{app_name}/config-vars",
+            data=body, method="PATCH",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Accept":        "application/vnd.heroku+json; version=3",
+                "Content-Type":  "application/json",
+            }
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+def _mongo_set_uri(uri):
+    """
+    Runtime mein MongoDB URI set karo:
+    1. os.environ update karo
+    2. Connection reset karo (naya connection use karega)
+    3. Heroku Config Var mein permanent save karo
+    4. Local fallback file mein bhi save karo
+    """
+    global _mongo_client, _mongo_db
+    uri = uri.strip()
+    os.environ["MONGODB_URI"] = uri
+    # Reset connection so next _get_mongo_db() call reconnects
+    try:
+        if _mongo_client:
+            _mongo_client.close()
+    except Exception:
+        pass
+    _mongo_client = None
+    _mongo_db     = None
+    # Heroku mein permanent save karo
+    _heroku_save_config_var("MONGODB_URI", uri)
+    # Local fallback file (ephemeral but helps current session)
+    try:
+        cfg_file = os.path.join(BASE_DIR, ".mongo_uri")
+        os.makedirs(BASE_DIR, exist_ok=True)
+        with open(cfg_file, "w") as f:
+            f.write(uri)
+    except Exception:
+        pass
+    # Test connection
+    db = _get_mongo_db()
+    return db is not None
 
 def _mongo_save_account(acc, owner_id=""):
     """Ek account (with session_string) MongoDB mein save/update karo."""
@@ -304,6 +360,17 @@ def load():
                     owner = acc.get("owner_id")
                     if owner:
                         owners[acc["phone"]] = str(owner)
+    # ── Local .mongo_uri fallback file se URI load karo ────────────────────────
+    if not os.environ.get("MONGODB_URI"):
+        try:
+            cfg_file = os.path.join(BASE_DIR, ".mongo_uri")
+            if os.path.exists(cfg_file):
+                with open(cfg_file) as f:
+                    uri_fb = f.read().strip()
+                if uri_fb:
+                    os.environ["MONGODB_URI"] = uri_fb
+        except Exception:
+            pass
     # ── Env vars se config load karo (agar data.json mein nahi hai) ────────────
     for env_key, cfg_key, cast in [
         ("BOT_TOKEN", "bot_token", str),
@@ -1598,6 +1665,35 @@ def _auto_start_userbot(acc, notify_chat_id=None):
         return False
     return _start_replyraid_thread(acc, api_id, api_hash, notify_chat_id)
 
+
+def _check_mongodb_on_startup():
+    """
+    Bot start pe check karo — agar MONGODB_URI nahi hai toh admin ko
+    /setmongouri command bhejne ka instruction do.
+    """
+    def _run():
+        import time
+        time.sleep(5)   # bot settle hone do
+        if _get_mongo_db() is not None:
+            return   # already connected, no need to notify
+        msg = (
+            "⚠️ <b>MongoDB URI Set Nahi Hai!</b>
+
+"
+            "Accounts Heroku restart ke baad wipe ho jaayenge.
+
+"
+            "<b>Fix karo — bot ko yeh message bhejo:</b>
+"
+            "<code>/setmongouri mongodb+srv://USER:PASS@cluster0.xxxx.mongodb.net/?retryWrites=true&amp;w=majority</code>
+
+"
+            "🆓 Free cluster: mongodb.com/atlas
+"
+            "📌 MONGODB_URI Heroku mein permanently save ho jaayegi — sirf ek baar karna hai!"
+        )
+        _notify_admin(msg)
+    threading.Thread(target=_run, daemon=True, name="mongo-startup-check").start()
 
 def _startup_all_userbots():
     """
@@ -3324,6 +3420,9 @@ def main_inline_kb():
         InlineKeyboardButton("📋 History",      callback_data="menu_history"),
         InlineKeyboardButton("❓ Help",         callback_data="menu_help"),
     )
+    kb.add(
+        InlineKeyboardButton("🍃 Set MongoDB URI", callback_data="menu_setmongouri"),
+    )
     return kb
 
 def cancel_kb():
@@ -3564,6 +3663,66 @@ def cmd_status(msg):
         f"  👥 Groups — Sirf groups/channels\n"
         f"  💬 DMs — Sirf personal chats",
     )
+
+# ── /setmongouri ──────────────────────────────────────────────────────────────
+@bot.message_handler(commands=["setmongouri"])
+def cmd_setmongouri(msg):
+    """Admin MongoDB URI bot se set kar sake — Heroku dashboard pe jaane ki zaroorat nahi."""
+    uid = msg.from_user.id
+    if not is_admin(uid):
+        bot.reply_to(msg, "❌ Sirf admin yeh command use kar sakta hai!"); return
+    parts = msg.text.strip().split(None, 1)
+    if len(parts) < 2 or not parts[1].strip().startswith("mongodb"):
+        bot.reply_to(
+            msg,
+            "❌ <b>Usage:</b>
+"
+            "<code>/setmongouri mongodb+srv://USER:PASS@cluster0.xxxx.mongodb.net/?retryWrites=true&amp;w=majority</code>
+
+"
+            "📌 Free cluster banao: mongodb.com/atlas",
+            parse_mode="HTML"
+        ); return
+    uri  = parts[1].strip()
+    wait = bot.reply_to(msg, "⏳ MongoDB se connect ho raha hoon...")
+    ok   = _mongo_set_uri(uri)
+    if ok:
+        # Existing accounts bhi MongoDB mein push karo
+        def _bg():
+            d = load()
+            owners = d.get("account_owners", {})
+            saved = 0
+            for acc in d.get("accounts", []):
+                acc_copy = dict(acc)
+                acc_copy["owner_id"] = owners.get(acc_copy.get("phone",""), "")
+                _mongo_save_account(acc_copy, owner_id=acc_copy["owner_id"])
+                saved += 1
+            if saved:
+                _notify_admin(f"✅ {saved} existing accounts bhi MongoDB mein save ho gaye!")
+        threading.Thread(target=_bg, daemon=True).start()
+        bot.edit_message_text(
+            "✅ <b>MongoDB Connected!</b>
+
+"
+            "🔒 URI Heroku Config Vars mein permanently save ho gayi.
+"
+            "🔄 Ab accounts bot restart ke baad bhi rahenge — dobara /add nahi karna!",
+            msg.chat.id, wait.message_id, parse_mode="HTML"
+        )
+    else:
+        bot.edit_message_text(
+            "❌ <b>MongoDB Connection Failed!</b>
+
+"
+            "Connection string check karo:
+"
+            "• Username/password sahi hai?
+"
+            "• Network Access mein 0.0.0.0/0 allow hai?
+"
+            "• mongodb.com/atlas → Network Access → Add IP Address",
+            msg.chat.id, wait.message_id, parse_mode="HTML"
+        )
 
 # ── /accounts ─────────────────────────────────────────────────────────────────
 @bot.message_handler(commands=["accounts"])
@@ -5356,6 +5515,22 @@ def cb_main_menu(call):
         cmd_history(fake)
     elif action == "menu_help":
         cmd_help(fake)
+    elif action == "menu_setmongouri":
+        bot.send_message(
+            call.message.chat.id,
+            "🍃 <b>MongoDB URI Set Karo</b>
+
+"
+            "Neeche diye format mein URI bhejo:
+"
+            "<code>/setmongouri mongodb+srv://USER:PASS@cluster0.xxxx.mongodb.net/?retryWrites=true&amp;w=majority</code>
+
+"
+            "🆓 Free cluster: mongodb.com/atlas
+"
+            f"📡 Current Status: {'✅ Connected' if _get_mongo_db() is not None else '❌ Not connected'}",
+            parse_mode="HTML"
+        )
 
 # ═══════════════════════════════════════════════════════
 #  UNIFIED CALLBACK HANDLER (broadcast wizard + tagall + misc)
@@ -6921,6 +7096,7 @@ def _start_bot_polling():
     print(f"   Mode      : {'Heroku/Server' if not sys.stdin.isatty() else 'Local'}\n")
     # ── Sabhi existing accounts ko userbot ki tarah auto-start karo ──────────
     _startup_all_userbots()
+    _check_mongodb_on_startup()
     bot.infinity_polling(timeout=20, long_polling_timeout=10)
 
 
