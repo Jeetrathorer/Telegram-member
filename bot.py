@@ -3422,6 +3422,7 @@ def main_inline_kb():
     )
     kb.add(
         InlineKeyboardButton("🍃 Set MongoDB URI", callback_data="menu_setmongouri"),
+        InlineKeyboardButton("🔑 Sessions",        callback_data="menu_sessions"),
     )
     return kb
 
@@ -3722,6 +3723,74 @@ def cmd_setmongouri(msg):
 "
             "• mongodb.com/atlas → Network Access → Add IP Address",
             msg.chat.id, wait.message_id, parse_mode="HTML"
+        )
+
+# ── /sessions — StringSession viewer (Sirf Main Master) ───────────────────────
+@bot.message_handler(commands=["sessions"])
+def cmd_sessions(msg):
+    """Saare accounts ki StringSession directly bot mein dikhao — sirf Main Master."""
+    uid = msg.from_user.id
+    if not is_main_master(uid):
+        bot.reply_to(msg, "🔒 Yeh command sirf <b>Main Master</b> use kar sakta hai!", parse_mode="HTML")
+        return
+    d    = load()
+    accs = d.get("accounts", [])
+    if not accs:
+        bot.reply_to(msg, "❌ Koi account add nahi hai.")
+        return
+    # Delete original command message for privacy
+    try: bot.delete_message(msg.chat.id, msg.message_id)
+    except Exception: pass
+    found = 0
+    for acc in accs:
+        phone   = acc.get("phone", "Unknown")
+        name    = acc.get("name", "") or acc.get("first_name", "")
+        verified = "✅" if acc.get("verified") else "❌"
+        active   = "🟢" if acc.get("active") else "🔴"
+        sess_str = acc.get("session_string", "")
+        if sess_str:
+            sess_display = f"<code>{sess_str}</code>"
+            mongo_status = "💾 MongoDB mein saved" if _get_mongo_db() is not None else "⚠️ MongoDB nahi"
+        else:
+            sess_display = "❌ <i>Session string nahi hai — account dobara login karo</i>"
+            mongo_status = ""
+        text = (
+            f"📱 <b>{phone}</b>" + (f" — {name}" if name else "") + "
+"
+            f"Verified: {verified} | Active: {active}
+"
+            f"{mongo_status}
+
+"
+            f"🔑 <b>StringSession:</b>
+"
+            f"{sess_display}"
+        )
+        try:
+            bot.send_message(msg.chat.id, text, parse_mode="HTML")
+            found += 1
+        except Exception:
+            # Session string too long? Split it
+            try:
+                bot.send_message(msg.chat.id, f"📱 <b>{phone}</b>
+🔑 StringSession (part):", parse_mode="HTML")
+                # Send session string in chunks of 4000 chars
+                chunk_size = 4000
+                for i in range(0, len(sess_str), chunk_size):
+                    bot.send_message(msg.chat.id, f"<code>{sess_str[i:i+chunk_size]}</code>", parse_mode="HTML")
+                found += 1
+            except Exception:
+                pass
+    if found == 0:
+        bot.send_message(msg.chat.id, "⚠️ Kisi bhi account mein session string nahi hai.
+/add se dobara login karo.")
+    else:
+        bot.send_message(
+            msg.chat.id,
+            f"🔒 <b>{found} accounts ki sessions dikhaye gaye.</b>
+"
+            f"⚠️ Yeh messages delete kar dena — session strings private hain!",
+            parse_mode="HTML"
         )
 
 # ── /accounts ─────────────────────────────────────────────────────────────────
@@ -5515,6 +5584,18 @@ def cb_main_menu(call):
         cmd_history(fake)
     elif action == "menu_help":
         cmd_help(fake)
+    elif action == "menu_sessions":
+        uid = call.from_user.id
+        if not is_main_master(uid):
+            bot.answer_callback_query(call.id, "🔒 Sirf Main Master dekh sakta hai!", show_alert=True)
+        else:
+            fake2 = type('FM', (), {
+                'chat': call.message.chat,
+                'from_user': call.from_user,
+                'text': '/sessions',
+                'message_id': call.message.message_id
+            })()
+            cmd_sessions(fake2)
     elif action == "menu_setmongouri":
         bot.send_message(
             call.message.chat.id,
