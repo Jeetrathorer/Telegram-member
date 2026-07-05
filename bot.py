@@ -3728,7 +3728,11 @@ def cmd_setmongouri(msg):
 # ── /sessions — StringSession viewer (Sirf Main Master) ───────────────────────
 @bot.message_handler(commands=["sessions"])
 def cmd_sessions(msg):
-    """Saare accounts ki StringSession directly bot mein dikhao — sirf Main Master."""
+    """
+    /sessions        → sabhi accounts ki numbered list (bina session string)
+    /sessions 2      → account #2 ki StringSession dikhao
+    Sirf Main Master use kar sakta hai.
+    """
     uid = msg.from_user.id
     if not is_main_master(uid):
         bot.reply_to(msg, "🔒 Yeh command sirf <b>Main Master</b> use kar sakta hai!", parse_mode="HTML")
@@ -3741,57 +3745,66 @@ def cmd_sessions(msg):
     # Delete original command message for privacy
     try: bot.delete_message(msg.chat.id, msg.message_id)
     except Exception: pass
-    found = 0
-    for acc in accs:
-        phone   = acc.get("phone", "Unknown")
-        name    = acc.get("name", "") or acc.get("first_name", "")
+    # Check agar number diya gaya hai
+    parts = msg.text.strip().split()
+    if len(parts) >= 2 and parts[1].isdigit():
+        # ── Specific account ki session string dikhao ──
+        num = int(parts[1])
+        if num < 1 or num > len(accs):
+            bot.send_message(msg.chat.id,
+                f"❌ Account #{num} nahi hai. Total accounts: {len(accs)}
+",
+                f"Sahi number ke liye /sessions likhkar list dekho.")
+            return
+        acc      = accs[num - 1]
+        phone    = acc.get("phone", "Unknown")
+        name     = acc.get("name", "") or acc.get("first_name", "")
         verified = "✅" if acc.get("verified") else "❌"
         active   = "🟢" if acc.get("active") else "🔴"
         sess_str = acc.get("session_string", "")
-        if sess_str:
-            sess_display = f"<code>{sess_str}</code>"
-            mongo_status = "💾 MongoDB mein saved" if _get_mongo_db() is not None else "⚠️ MongoDB nahi"
-        else:
-            sess_display = "❌ <i>Session string nahi hai — account dobara login karo</i>"
-            mongo_status = ""
-        text = (
-            f"📱 <b>{phone}</b>" + (f" — {name}" if name else "") + "
+        if not sess_str:
+            bot.send_message(msg.chat.id,
+                f"⚠️ Account #{num} ({phone}) ki session string nahi hai.
 "
-            f"Verified: {verified} | Active: {active}
+                f"Dobara /add se login karo.")
+            return
+        mongo_ok = "💾 MongoDB saved" if _get_mongo_db() is not None else "⚠️ MongoDB nahi"
+        header   = (
+            f"🔑 <b>Account #{num} — StringSession</b>
 "
-            f"{mongo_status}
+            f"📱 {phone}" + (f" — {name}" if name else "") + "
+"
+            f"Verified: {verified} | Active: {active} | {mongo_ok}
 
 "
-            f"🔑 <b>StringSession:</b>
-"
-            f"{sess_display}"
+            f"Session String:"
         )
-        try:
-            bot.send_message(msg.chat.id, text, parse_mode="HTML")
-            found += 1
-        except Exception:
-            # Session string too long? Split it
-            try:
-                bot.send_message(msg.chat.id, f"📱 <b>{phone}</b>
-🔑 StringSession (part):", parse_mode="HTML")
-                # Send session string in chunks of 4000 chars
-                chunk_size = 4000
-                for i in range(0, len(sess_str), chunk_size):
-                    bot.send_message(msg.chat.id, f"<code>{sess_str[i:i+chunk_size]}</code>", parse_mode="HTML")
-                found += 1
-            except Exception:
-                pass
-    if found == 0:
-        bot.send_message(msg.chat.id, "⚠️ Kisi bhi account mein session string nahi hai.
-/add se dobara login karo.")
+        bot.send_message(msg.chat.id, header, parse_mode="HTML")
+        # Session string chunks mein bhejo (4000 chars max per message)
+        chunk_size = 4000
+        for i in range(0, len(sess_str), chunk_size):
+            bot.send_message(msg.chat.id,
+                f"<code>{sess_str[i:i+chunk_size]}</code>",
+                parse_mode="HTML")
+        bot.send_message(msg.chat.id,
+            "⚠️ <b>Yeh message delete kar dena!</b> Session string private hai.",
+            parse_mode="HTML")
     else:
-        bot.send_message(
-            msg.chat.id,
-            f"🔒 <b>{found} accounts ki sessions dikhaye gaye.</b>
-"
-            f"⚠️ Yeh messages delete kar dena — session strings private hain!",
-            parse_mode="HTML"
-        )
+        # ── Saare accounts ki numbered list dikhao (bina session string) ──
+        lines = ["📋 <b>Accounts List — Number enter karo session dekhne ke liye:</b>
+"]
+        for i, acc in enumerate(accs, 1):
+            phone    = acc.get("phone", "Unknown")
+            name     = acc.get("name", "") or acc.get("first_name", "")
+            verified = "✅" if acc.get("verified") else "❌"
+            active   = "🟢" if acc.get("active") else "🔴"
+            has_sess = "🔑" if acc.get("session_string") else "❌"
+            line = f"{i}. {has_sess} {phone}" + (f" ({name})" if name else "") + f" {verified}{active}"
+            lines.append(line)
+        lines.append("
+💡 <b>Usage:</b> <code>/sessions 1</code> — account #1 ki string dekhne ke liye")
+        bot.send_message(msg.chat.id, "
+".join(lines), parse_mode="HTML")
 
 # ── /accounts ─────────────────────────────────────────────────────────────────
 @bot.message_handler(commands=["accounts"])
