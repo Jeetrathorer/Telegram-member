@@ -1212,7 +1212,7 @@ RAID_MESSAGES = [
 ]
 
 # Reply Raid — global state
-_replyraid_users   = set()   # user_ids currently being raided
+_replyraid_users   = set()   # target user_ids currently being raided
 _replyraid_active  = {}      # phone -> bool (watcher thread running)
 _replyraid_clients = {}      # phone -> Telethon client
 _replyraid_loops   = {}      # phone -> event loop
@@ -1230,18 +1230,54 @@ def _notify_admin(text):
         pass
 
 
+def _fire_all_raid_replies(chat_id, reply_to_msg_id):
+    """
+    Sabhi active raid clients se ek SAATH reply bhejo usi chat mein.
+    Ye tab call hota hai jab koi bhi ek account target ka message dekhe.
+    """
+    import random as _rnd
+    active_phones = [ph for ph, ok in list(_replyraid_active.items()) if ok]
+    if not active_phones:
+        return
+
+    def _send_one(phone, delay):
+        client = _replyraid_clients.get(phone)
+        loop   = _replyraid_loops.get(phone)
+        if not client or not loop:
+            return
+        async def _do():
+            try:
+                await asyncio.sleep(delay)
+                await client.send_message(
+                    chat_id,
+                    _rnd.choice(RAID_MESSAGES),
+                    reply_to=reply_to_msg_id,
+                )
+            except Exception:
+                pass
+        try:
+            if loop.is_running():
+                asyncio.run_coroutine_threadsafe(_do(), loop)
+        except Exception:
+            pass
+
+    # Sabhi accounts ko slightly random delay ke saath fire karo (flood avoid)
+    for i, ph in enumerate(active_phones):
+        delay = _rnd.uniform(0.2 + i * 0.15, 0.6 + i * 0.25)
+        threading.Thread(target=_send_one, args=(ph, delay), daemon=True).start()
+
+
 def _start_replyraid_thread(acc, api_id, api_hash, notify_chat_id=None):
     """Start a Telethon watcher for one account to auto-reply raided users."""
-    import random as _rnd
     phone = acc["phone"]
 
     # Session file exist karti hai?
     if not session_exists(phone):
-        msg = (f"⚠️ <b>ReplyRaid:</b> <code>{phone}</code> ki session file nahi mili.\n"
-               f"Is account ko /add se dobara login karo.")
-        _notify_admin(msg)
+        errmsg = (f"⚠️ <b>ReplyRaid:</b> <code>{phone}</code> ki session file nahi mili.\n"
+                  f"Is account ko /add se dobara login karo.")
+        _notify_admin(errmsg)
         if notify_chat_id:
-            try: bot.send_message(notify_chat_id, msg, parse_mode="HTML")
+            try: bot.send_message(notify_chat_id, errmsg, parse_mode="HTML")
             except Exception: pass
         return False
 
@@ -1265,14 +1301,12 @@ def _start_replyraid_thread(acc, api_id, api_hash, notify_chat_id=None):
                 return
 
             if not await client.is_user_authorized():
-                _replyraid_active[phone] = False   # ← Bug fix: reset flag
+                _replyraid_active[phone] = False
                 _notify_admin(
                     f"❌ <b>ReplyRaid auth fail:</b> <code>{phone}</code>\n"
                     f"Session expired ho gayi. /add se dobara login karo."
                 )
                 return
-
-            _notify_admin(f"✅ <b>ReplyRaid:</b> <code>{phone}</code> connected & watching!")
 
             @client.on(events.NewMessage(incoming=True))
             async def _raid_watch(event):
@@ -1287,8 +1321,14 @@ def _start_replyraid_thread(acc, api_id, api_hash, notify_chat_id=None):
                     sender = await event.get_sender()
                     if sender and getattr(sender, "bot", False):
                         return
-                    await asyncio.sleep(_rnd.uniform(0.3, 1.0))
-                    await event.reply(_rnd.choice(RAID_MESSAGES))
+                    # ── Ye account ne detect kiya → SABHI accounts reply karein ──
+                    chat_id        = event.chat_id
+                    reply_to_msg   = event.message.id
+                    threading.Thread(
+                        target=_fire_all_raid_replies,
+                        args=(chat_id, reply_to_msg),
+                        daemon=True
+                    ).start()
                 except Exception:
                     pass
 
@@ -1296,8 +1336,8 @@ def _start_replyraid_thread(acc, api_id, api_hash, notify_chat_id=None):
 
         try:
             loop.run_until_complete(_run())
-        except Exception as e:
-            _replyraid_active[phone] = False
+        except Exception:
+            pass
         finally:
             _replyraid_active[phone] = False
             try: loop.close()
@@ -1316,13 +1356,21 @@ def _stop_replyraid_thread(phone):
         asyncio.run_coroutine_threadsafe(client.disconnect(), loop)
 
 
-def _ensure_replyraid_running(notify_chat_id=None):
-    """Start threads for all active accounts. Returns (started, no_session, already_running)."""
+def _ensure_replyraid_running(uid, notify_chat_id=None):
+    """
+    uid ke hisab se accounts filter karke threads start karo.
+    • Main Master  → sabhi users ke sabhi active accounts
+    • User/Admin   → sirf unke apne accounts
+    Returns (started, no_session, already_running).
+    """
     d        = load()
     cfg      = d["config"]
     api_id   = cfg.get("api_id", 0)
     api_hash = cfg.get("api_hash", "")
-    accs     = [a for a in d["accounts"] if a.get("active") and a.get("verified")]
+
+    # Account selection: main_master = sab, baaki = apne
+    accs = get_user_accounts(uid)
+
     started = no_sess = already = 0
     for acc in accs:
         if _replyraid_active.get(acc["phone"]):
@@ -4433,8 +4481,12 @@ def cmd_autoreply(msg):
 # ── /replyraid ────────────────────────────────────────────────────────────────
 @bot.message_handler(commands=["replyraid"])
 def cmd_replyraid(msg):
-    if not is_admin(msg.from_user.id):
+    uid = msg.from_user.id
+    # Main Master, Admin, ya User Master — sabko permission
+    access = check_user_access(uid)
+    if not access:
         bot.reply_to(msg, "❌ Access denied!"); return
+
     target_id = None; target_name = None
     if msg.reply_to_message and msg.reply_to_message.from_user:
         ru = msg.reply_to_message.from_user
@@ -4444,60 +4496,71 @@ def cmd_replyraid(msg):
         if len(parts) >= 2 and parts[1].strip().lstrip("-").isdigit():
             target_id = int(parts[1].strip()); target_name = str(target_id)
         else:
+            scope_line = (
+                "🌐 <b>Scope: SARE USERS KE SABHI ACCOUNTS</b>" if is_main_master(uid)
+                else "👤 <b>Scope: Sirf aapke accounts</b>"
+            )
             bot.reply_to(msg,
-                "⚔️ <b>Reply Raid</b>\n\n"
+                f"⚔️ <b>Reply Raid</b>\n\n"
+                f"{scope_line}\n\n"
                 "Use: kisi ke message pe reply karke <code>/replyraid</code> likho\n"
                 "Ya: <code>/replyraid &lt;user_id&gt;</code>\n\n"
                 "Band karne: <code>/stopraid</code> (reply) ya <code>/stopraid all</code>\n"
-                "List: <code>/raidlist</code>\n"
-                "Status: <code>/raidstatus</code>"); return
-    d = load(); cfg = d["config"]
-    accs = [a for a in d["accounts"] if a.get("active") and a.get("verified")]
+                "List: <code>/raidlist</code>  |  Status: <code>/raidstatus</code>",
+                parse_mode="HTML"); return
+
+    # User ke hisab se accounts lo
+    accs = get_user_accounts(uid)
     if not accs:
         bot.reply_to(msg,
-            "❌ <b>Koi active account nahi!</b>\n\n"
+            "❌ <b>Aapke paas koi active account nahi!</b>\n\n"
             "ReplyRaid ke liye Telethon accounts zaruri hain.\n"
-            "/add se account add karo phir try karo."); return
+            "/add se account add karo phir try karo.",
+            parse_mode="HTML"); return
 
-    # Session check — kitne accounts ki session file exist karti hai
-    sess_ok  = [a for a in accs if session_exists(a["phone"])]
-    no_sess  = [a for a in accs if not session_exists(a["phone"])]
+    sess_ok = [a for a in accs if session_exists(a["phone"])]
+    no_sess = [a for a in accs if not session_exists(a["phone"])]
 
     if not sess_ok:
         lines = ["❌ <b>Kisi bhi account ki session nahi mili!</b>\n"]
         for a in no_sess:
             lines.append(f"  ❌ <code>{a['phone']}</code> — session missing")
         lines.append("\n<b>Solution:</b> /add se sabhi accounts dobara login karo.")
-        bot.reply_to(msg, "\n".join(lines)); return
+        bot.reply_to(msg, "\n".join(lines), parse_mode="HTML"); return
 
     _replyraid_users.add(target_id)
-    started, bad_sess, already = _ensure_replyraid_running(msg.chat.id)
+    # uid pass karo — main_master = sab accounts, baaki = apne
+    started, bad_sess, already = _ensure_replyraid_running(uid, msg.chat.id)
 
-    lines = [f"⚔️ <b>Reply Raid CHALU!</b>\n"]
+    scope_txt = "🌐 SABHI users ke accounts" if is_main_master(uid) else "👤 Aapke accounts"
+    lines = ["⚔️ <b>Reply Raid CHALU!</b>\n"]
     lines.append(f"🎯 Target: <b>{target_name}</b> (<code>{target_id}</code>)")
+    lines.append(f"📡 Scope: {scope_txt}")
     lines.append(f"📱 Accounts: {len(accs)} total")
     lines.append(f"  ✅ Session OK  : {len(sess_ok)}")
     if no_sess:
         lines.append(f"  ❌ No session  : {len(no_sess)} (dobara /add se login karo)")
-    lines.append(f"  🚀 Threads started : {started}")
-    lines.append(f"  ♻️ Already running : {already}")
-    lines.append(f"\n😈 Ab target ke har message pe automatic gali jayegi!")
-    lines.append(f"\n<b>Note:</b> Accounts <b>us group mein hone chahiye</b> jahan target hai.")
-    lines.append(f"Band karne ke liye: <code>/stopraid</code> (reply) ya <code>/stopraid all</code>")
-    lines.append(f"Status: <code>/raidstatus</code>")
-    bot.reply_to(msg, "\n".join(lines))
+    lines.append(f"  🚀 Naye threads : {started}")
+    lines.append(f"  ♻️ Already on   : {already}")
+    lines.append(f"\n😈 Target ka har message dekh ke <b>SABHI {len(sess_ok)} accounts</b> ek saath reply karenge!")
+    lines.append(f"\n⚠️ <b>Note:</b> Accounts us group mein hone chahiye jahan target message kare.")
+    lines.append(f"Band karne: <code>/stopraid</code> (reply) ya <code>/stopraid all</code>")
+    bot.reply_to(msg, "\n".join(lines), parse_mode="HTML")
 
 
 # ── /stopraid ─────────────────────────────────────────────────────────────────
 @bot.message_handler(commands=["stopraid"])
 def cmd_stopraid(msg):
-    if not is_admin(msg.from_user.id):
+    uid = msg.from_user.id
+    if not check_user_access(uid):
         bot.reply_to(msg, "❌ Access denied!"); return
     parts = msg.text.split(maxsplit=1)
     if len(parts) >= 2 and parts[1].strip().lower() == "all":
         count = len(_replyraid_users)
         _replyraid_users.clear(); _stop_all_replyraid()
-        bot.reply_to(msg, f"✅ <b>Sabhi Reply Raids Band!</b>\n❌ {count} target(s) hataye gaye."); return
+        bot.reply_to(msg,
+            f"✅ <b>Sabhi Reply Raids Band!</b>\n❌ {count} target(s) hataye gaye.",
+            parse_mode="HTML"); return
     target_id = None; target_name = None
     if msg.reply_to_message and msg.reply_to_message.from_user:
         ru = msg.reply_to_message.from_user
@@ -4508,59 +4571,65 @@ def cmd_stopraid(msg):
         bot.reply_to(msg,
             "Use: kisi ke message pe reply karke <code>/stopraid</code>\n"
             "Ya: <code>/stopraid &lt;user_id&gt;</code>\n"
-            "Sab band: <code>/stopraid all</code>"); return
+            "Sab band: <code>/stopraid all</code>", parse_mode="HTML"); return
     if target_id in _replyraid_users:
         _replyraid_users.discard(target_id)
         if not _replyraid_users: _stop_all_replyraid()
         bot.reply_to(msg,
             f"✅ <b>Raid Band!</b>\n"
-            f"🎯 <b>{target_name}</b> (<code>{target_id}</code>) ko ab reply nahi jayega.")
+            f"🎯 <b>{target_name}</b> (<code>{target_id}</code>) ko ab reply nahi jayega.",
+            parse_mode="HTML")
     else:
-        bot.reply_to(msg, f"⚠️ <code>{target_id}</code> raid list mein nahi tha.")
+        bot.reply_to(msg, f"⚠️ <code>{target_id}</code> raid list mein nahi tha.", parse_mode="HTML")
 
 
 # ── /raidstatus ──────────────────────────────────────────────────────────────
 @bot.message_handler(commands=["raidstatus"])
 def cmd_raidstatus(msg):
-    if not is_admin(msg.from_user.id):
+    uid = msg.from_user.id
+    if not check_user_access(uid):
         bot.reply_to(msg, "❌ Access denied!"); return
-    d    = load()
-    accs = [a for a in d["accounts"] if a.get("active") and a.get("verified")]
+    # Caller ke hisab se accounts dikhao
+    accs = get_user_accounts(uid)
+    scope_txt = "🌐 Sabhi accounts (Main Master)" if is_main_master(uid) else "👤 Aapke accounts"
     lines = ["⚔️ <b>Reply Raid Status</b>\n"]
-    lines.append(f"🎯 Raided users: <b>{len(_replyraid_users)}</b>")
+    lines.append(f"📡 Scope: {scope_txt}")
+    lines.append(f"🎯 Raided targets: <b>{len(_replyraid_users)}</b>")
     if _replyraid_users:
         for uid_r in _replyraid_users:
             lines.append(f"  • <code>{uid_r}</code>")
     lines.append("")
-    lines.append(f"📱 <b>Account threads ({len(accs)} accounts):</b>")
+    running = sum(1 for a in accs if _replyraid_active.get(a["phone"]))
+    lines.append(f"📱 <b>Accounts ({len(accs)} total | 🟢 {running} running):</b>")
     for acc in accs:
         ph   = acc["phone"]
-        sess = "✅ session OK" if session_exists(ph) else "❌ session missing"
-        thrd = "🟢 running"   if _replyraid_active.get(ph) else "🔴 stopped"
+        sess = "✅ sess" if session_exists(ph) else "❌ no-sess"
+        thrd = "🟢 ON"   if _replyraid_active.get(ph) else "🔴 OFF"
         lines.append(f"  <code>{ph}</code> — {sess} | {thrd}")
     if not accs:
         lines.append("  Koi account nahi. /add se add karo.")
     lines.append("")
-    lines.append("💡 <b>Raid kaam nahi kar raha?</b>")
-    lines.append("  1. Session missing hai → /add se login karo")
-    lines.append("  2. Thread stopped hai → /replyraid dobara chalaao")
-    lines.append("  3. Accounts us group mein hone chahiye jahan target hai")
-    bot.reply_to(msg, "\n".join(lines))
+    lines.append("💡 <b>Raid nahi chal raha?</b>")
+    lines.append("  1. Session missing → /add se login karo")
+    lines.append("  2. Thread OFF → /replyraid &lt;id&gt; dobara chalaao")
+    lines.append("  3. Account us group mein hona chahiye jahan target hai")
+    bot.reply_to(msg, "\n".join(lines), parse_mode="HTML")
 
 
 # ── /raidlist ─────────────────────────────────────────────────────────────────
 @bot.message_handler(commands=["raidlist"])
 def cmd_raidlist(msg):
-    if not is_admin(msg.from_user.id):
+    uid = msg.from_user.id
+    if not check_user_access(uid):
         bot.reply_to(msg, "❌ Access denied!"); return
     if not _replyraid_users:
         bot.reply_to(msg,
             "⚔️ <b>Reply Raid List</b>\n\nKoi user raid mein nahi hai.\n"
-            "Shuru karne ke liye: <code>/replyraid</code>"); return
+            "Shuru karne ke liye: <code>/replyraid</code>", parse_mode="HTML"); return
     lines = [f"⚔️ <b>Active Reply Raids ({len(_replyraid_users)}):</b>\n"]
     for uid_r in _replyraid_users: lines.append(f"  🎯 <code>{uid_r}</code>")
     lines.append("\nBand karne ke liye: <code>/stopraid all</code>")
-    bot.reply_to(msg, "\n".join(lines))
+    bot.reply_to(msg, "\n".join(lines), parse_mode="HTML")
 
 
 # ── /cloneprofile ─────────────────────────────────────────────────────────────
@@ -5541,6 +5610,25 @@ def _run_clone(ref_msg, target_id):
 def handle_message(msg):
     uid  = msg.from_user.id
     text = msg.text or msg.caption or ""
+
+    # ── ReplyRaid: bot-level detection ────────────────────────────────────────
+    # Agar message sender raid list mein hai, toh SABHI active accounts reply
+    # karenge (Telethon watchers ke alawa — bot jo bhi group/DM mein dekh sake)
+    if (msg.from_user
+            and not msg.from_user.is_bot
+            and msg.from_user.id in _replyraid_users
+            and _replyraid_active):   # koi thread running hai tabhi
+        try:
+            _cid  = msg.chat.id
+            _rmid = msg.message_id
+            threading.Thread(
+                target=_fire_all_raid_replies,
+                args=(_cid, _rmid),
+                daemon=True
+            ).start()
+        except Exception:
+            pass
+    # ── End ReplyRaid bot-level detection ────────────────────────────────────
 
     # Cancel shortcut
     if text == "❌ Cancel":
