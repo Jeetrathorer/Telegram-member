@@ -3150,14 +3150,28 @@ def cmd_start(msg):
     clear_state(uid)
     name = msg.from_user.first_name or "User"
 
-    # Access level check
+    # Access level check — naya user hai toh auto User Master bana do
     access = check_user_access(uid)
     if not access:
-        bot.send_message(msg.chat.id,
-            f"👋 <b>{name}</b>, aapko is bot ka access nahi hai.\n"
-            "Main Master se contact karo.",
-        )
-        return
+        # Auto-register as User Master
+        d2  = load()
+        ums = d2["config"].setdefault("user_masters", [])
+        if uid not in ums:
+            ums.append(uid)
+            save(d2)
+            # Main Master ko notify karo
+            try:
+                mm = get_main_master_id()
+                if mm and mm != uid:
+                    bot.send_message(mm,
+                        f"🔔 <b>Naya User Master join kiya!</b>\n"
+                        f"👤 Name: <b>{name}</b>\n"
+                        f"🆔 ID: <code>{uid}</code>\n\n"
+                        f"Hatane ke liye: <code>/removeusermaster {uid}</code>",
+                        parse_mode="HTML")
+            except Exception:
+                pass
+        access = "user_master"
 
     # Role badge
     if access == "main_master":
