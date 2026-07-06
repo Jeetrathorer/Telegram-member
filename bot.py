@@ -3490,21 +3490,39 @@ def cmd_stats(msg):
 # ── /status ───────────────────────────────────────────────────────────────────
 @bot.message_handler(commands=["status"])
 def cmd_status(msg):
-    if not is_admin(msg.from_user.id):
+    uid    = msg.from_user.id
+    access = check_user_access(uid)
+    if not access:
         bot.reply_to(msg, "❌ Access denied!"); return
+
     d      = load()
-    accs   = d["accounts"]
+    accs   = get_user_accounts(uid)
     active = sum(1 for a in accs if a.get("active") and a.get("verified"))
-    api_ok = "✅" if d["config"].get("api_id") and d["config"].get("api_hash") else "❌"
-    bot_ok = "✅" if d["config"].get("bot_token") else "❌"
+
+    # ── MAIN MASTER: Full system status ──────────────────────────────────────
+    if access == "main_master":
+        api_ok = "✅" if d["config"].get("api_id") and d["config"].get("api_hash") else "❌"
+        bot_ok = "✅" if d["config"].get("bot_token") else "❌"
+        bot.reply_to(
+            msg,
+            f"📊 <b>System Status</b>\n\n"
+            f"Bot Token: {bot_ok}\n"
+            f"API Credentials: {api_ok}\n"
+            f"💾 MongoDB: {'✅ Connected' if _get_mongo_db() is not None else '⚠️ Not connected (MONGODB_URI set karo)'}\n\n"
+            f"👤 Accounts: {len(accs)} (Active: {active})\n\n"
+            f"📈 Dialog Broadcasts: {len(d['history'])}\n\n"
+            f"🎯 Broadcast Modes:\n"
+            f"  📢 All — Groups + DMs dono\n"
+            f"  👥 Groups — Sirf groups/channels\n"
+            f"  💬 DMs — Sirf personal chats",
+        )
+        return
+
+    # ── USER MASTER / USER: Sirf apne account ka status ──────────────────────
     bot.reply_to(
         msg,
-        f"📊 <b>System Status</b>\n\n"
-        f"Bot Token: {bot_ok}\n"
-        f"API Credentials: {api_ok}\n"
-        f"💾 MongoDB: {'✅ Connected' if _get_mongo_db() is not None else '⚠️ Not connected (MONGODB_URI set karo)'}\n\n"
-        f"👤 Accounts: {len(accs)} (Active: {active})\n\n"
-        f"📈 Dialog Broadcasts: {len(d['history'])}\n\n"
+        f"📊 <b>Aapka Account Status</b>\n\n"
+        f"👤 Aapke Accounts: {len(accs)} (Active: {active})\n\n"
         f"🎯 Broadcast Modes:\n"
         f"  📢 All — Groups + DMs dono\n"
         f"  👥 Groups — Sirf groups/channels\n"
