@@ -1677,19 +1677,11 @@ def _check_mongodb_on_startup():
         if _get_mongo_db() is not None:
             return   # already connected, no need to notify
         msg = (
-            "⚠️ <b>MongoDB URI Set Nahi Hai!</b>
-
-"
-            "Accounts Heroku restart ke baad wipe ho jaayenge.
-
-"
-            "<b>Fix karo — bot ko yeh message bhejo:</b>
-"
-            "<code>/setmongouri mongodb+srv://USER:PASS@cluster0.xxxx.mongodb.net/?retryWrites=true&amp;w=majority</code>
-
-"
-            "🆓 Free cluster: mongodb.com/atlas
-"
+            "⚠️ <b>MongoDB URI Set Nahi Hai!</b>\n\n"
+            "Accounts Heroku restart ke baad wipe ho jaayenge.\n\n"
+            "<b>Fix karo — bot ko yeh message bhejo:</b>\n"
+            "<code>/setmongouri mongodb+srv://USER:PASS@cluster0.xxxx.mongodb.net/?retryWrites=true&amp;w=majority</code>\n\n"
+            "🆓 Free cluster: mongodb.com/atlas\n"
             "📌 MONGODB_URI Heroku mein permanently save ho jaayegi — sirf ek baar karna hai!"
         )
         _notify_admin(msg)
@@ -2579,251 +2571,7 @@ async def do_targeted_broadcast(chat_id_bot, data_bc, bot_instance):
             if not await client.is_user_authorized():
                 bot_instance.send_message(chat_id_bot,
                     f"⚠️ <code>{acc['phone']}</code> session expire — next account!")
-                # Don't advance i — same members try with next account
-                acc_idx += 1
-                continue
-
-            for j, member in enumerate(chunk):
-                uid_m    = int(member["telegram_id"])
-                acc_hash = int(member["access_hash"] or 0)
-                uname    = (member["username"] or "").strip()
-
-                # Resolve target
-                try:
-                    if acc_hash:
-                        target = InputUser(user_id=uid_m, access_hash=acc_hash)
-                    elif uname:
-                        target = await client.get_input_entity(f"@{uname}")
-                    else:
-                        target = uid_m
-                except Exception:
-                    target = uid_m
-
-                try:
-                    await _send_one(client, target, broadcast_id, member["id"], ext)
-                    acc_sent   += 1
-                    total_sent += 1
-                    members_done_in_chunk = j + 1
-                    _del_member(member["id"])
-                    deleted_ids.append(member["id"])
-                    await asyncio.sleep(DELAY_DM)
-
-                except (UserPrivacyRestrictedError, UserIsBlockedError,
-                        InputUserDeactivatedError):
-                    total_skipped += 1
-                    members_done_in_chunk = j + 1
-                    _del_member(member["id"])
-                    deleted_ids.append(member["id"])
-
-                except PeerFloodError:
-                    spammy_phones.add(acc["phone"])
-                    spam_hit = True
-                    bot_instance.send_message(chat_id_bot,
-                        f"🚫 <code>{acc['phone']}</code> SPAM! "
-                        f"Is account se {j} members done. Baki next account se...")
-                    # i will be reset to chunk_start + j so next acc re-handles from here
-                    members_done_in_chunk = j
-                    break
-
-                except FloodWaitError as e:
-                    wait = min(e.seconds, 90)
-                    bot_instance.send_message(chat_id_bot,
-                        f"⏳ FloodWait {e.seconds}s — {wait}s ruk raha hoon...")
-                    await asyncio.sleep(wait)
-                    try:
-                        await _send_one(client, target, broadcast_id, member["id"], ext)
-                        acc_sent   += 1
-                        total_sent += 1
-                        members_done_in_chunk = j + 1
-                        _del_member(member["id"])
-                        deleted_ids.append(member["id"])
-                    except Exception:
-                        total_failed += 1
-                        members_done_in_chunk = j + 1
-
-                except Exception:
-                    total_failed += 1
-                    members_done_in_chunk = j + 1
-
-            # Account summary
-            if acc_sent:
-                bot_instance.send_message(chat_id_bot,
-                    f"✅ <code>{acc['phone']}</code>: <b>{acc_sent}</b> messages sent."
-                    + (f"\n🚫 Spam hit — next account lete hain." if spam_hit else ""))
-
-        except Exception as e:
-            bot_instance.send_message(chat_id_bot,
-                f"❌ <code>{acc['phone']}</code> error: {e}")
-            members_done_in_chunk = len(chunk)
-        finally:
-            try: await client.disconnect()
-            except Exception: pass
-
-        # Advance i only by members actually processed
-        i = chunk_start + members_done_in_chunk
-        # Always move to next account (spammy ones will be skipped at top of loop)
-        acc_idx += 1
-        await asyncio.sleep(2)
-
-    # ── Update DB stats ───────────────────────────────────────────────────────
-    conn = get_db()
-    conn.execute(
-        "UPDATE broadcast_jobs SET status='done',total_sent=?,total_failed=?,total_skipped=? WHERE id=?",
-        (total_sent, total_failed, total_skipped + skipped_inactive, broadcast_id),
-    )
-    conn.commit()
-    conn.close()
-
-    bot_instance.send_message(
-        chat_id_bot,
-        f"🎉 <b>Broadcast Complete!</b>\n\n"
-        f"✅ Sent: <b>{total_sent}</b>\n"
-        f"❌ Failed: <b>{total_failed}</b>\n"
-        f"⏭ Skipped (privacy/inactive): <b>{total_skipped + skipped_inactive}</b>\n"
-        f"🗑️ DB se remove: <b>{len(deleted_ids)}</b>\n"
-        f"━━━━━━━━━━\n"
-        f"📊 Total targeted: <b>{total_targeted}</b>"
-    )
-
-# ═══════════════════════════════════════════════════════
-#  GROUP ADD CAMPAIGN ENGINE  (v2 — no phone number leak)
-#  Flow:
-#    Phase 1 — Direct InviteToChannelRequest (no AddContact)
-#      For each member: try adding to target group directly
-#        ✅ Success     → delete from members DB (no duplicate)
-#        🔒 Privacy     → privacy_queue (phase 2)
-#        ⚠️ Flood/Spam  → switch account
-#
-#    Phase 2 — Send invite link to privacy-blocked members
-#      Try DM with invite link
-#        ✅ Sent  → delete from members DB
-#        🔒 Privacy again → skip
-# ═══════════════════════════════════════════════════════
-
-async def do_group_add_campaign(chat_id_bot, scrape_id, target_group, invite_link,
-                                 max_per_acc, bot_instance):
-    """
-    Phase 1: InviteToChannelRequest se directly group mein add karo (no AddContact).
-    Phase 2: Privacy-blocked members ko invite link DM karo.
-    • Har member SIRF EK account se process hoga (no duplicate)
-    • Spam account → blacklist, same members next account se try
-    • Processed/failed members DB se TURANT delete hote hain
-    """
-    d    = load()
-    cfg  = d["config"]
-    accs = active_accounts(d)
-
-    if not accs:
-        bot_instance.send_message(chat_id_bot, "❌ Koi active account nahi! Pehle /add karo.")
-        return
-
-    conn    = get_db()
-    members = conn.execute(
-        "SELECT * FROM members WHERE scrape_id=? AND is_deleted=0 ORDER BY id",
-        (scrape_id,)
-    ).fetchall()
-    cur = conn.execute(
-        "INSERT INTO contact_add_jobs (scrape_id,invite_link,broadcast_msg,max_per_acc) VALUES (?,?,?,?)",
-        (scrape_id, invite_link, "", max_per_acc)
-    )
-    job_id = cur.lastrowid
-    conn.commit()
-    conn.close()
-
-    total         = len(members)
-    member_list   = list(members)
-    grand_added   = 0
-    grand_link    = 0
-    grand_failed  = 0
-    grand_deleted = 0
-    privacy_queue = []   # Phase 2 ke liye
-    spammy_phones = set()  # Phase 1 spam accounts — Phase 2 mein bhi skip honge
-
-    # ── helper: delete member from DB immediately ─────────────────────────────
-    def _del(mid):
-        nonlocal grand_deleted
-        try:
-            c = get_db()
-            c.execute("DELETE FROM members WHERE id=?", (mid,))
-            c.commit()
-            c.close()
-            grand_deleted += 1
-        except Exception:
-            pass
-
-    # ── helper: resolve InputUser ─────────────────────────────────────────────
-    async def resolve_user(client, member):
-        uid_m    = int(member["telegram_id"])
-        acc_hash = int(member["access_hash"] or 0)
-        uname    = (member["username"] or "").strip()
-        if acc_hash:
-            return InputUser(user_id=uid_m, access_hash=acc_hash)
-        if uname:
-            try:
-                return await client.get_input_entity(f"@{uname}")
-            except Exception:
-                pass
-        try:
-            return await client.get_input_entity(uid_m)
-        except Exception:
-            return None
-
-    bot_instance.send_message(
-        chat_id_bot,
-        f"🚀 <b>Group Add Campaign Shuru!</b>\n\n"
-        f"🎯 Target: <code>{target_group}</code>\n"
-        f"👥 Total members: <b>{total}</b>\n"
-        f"📱 Accounts: <b>{len(accs)}</b>\n"
-        f"🔢 Per account: <b>{max_per_acc}</b>\n\n"
-        "ℹ️ Har member ek baar, ek hi account se try hoga."
-    )
-
-    # ── Normalize target group ────────────────────────────────────────────────
-    tg = target_group.strip()
-    if tg.startswith("https://t.me/"):
-        slug = tg.split("https://t.me/")[1].split("/")[0]
-        tg   = ("https://t.me/" + slug) if slug.startswith("+") else ("@" + slug)
-    elif not tg.startswith("@") and not tg.startswith("-") and not tg.lstrip("-").isdigit():
-        tg = "@" + tg
-
-    # ═══════════════════════════════════════════════════════════
-    #  PHASE 1: Direct InviteToChannelRequest
-    # ═══════════════════════════════════════════════════════════
-    i       = 0
-    acc_idx = 0
-
-    while i < len(member_list):
-        # Skip spammy accounts
-        while acc_idx < len(accs) and accs[acc_idx]["phone"] in spammy_phones:
-            acc_idx += 1
-
-        if acc_idx >= len(accs):
-            bot_instance.send_message(chat_id_bot,
-                f"⚠️ Saare accounts spam/khatam!\n"
-                f"Baki {len(member_list)-i} members → Phase 2 invite link mein.")
-            privacy_queue.extend(member_list[i:])
-            break
-
-        acc         = accs[acc_idx]
-        chunk       = member_list[i : i + max_per_acc]
-        chunk_start = i
-
-        bot_instance.send_message(chat_id_bot,
-            f"📱 <code>{acc['phone']}</code> — "
-            f"members {i+1}–{min(i+max_per_acc, total)}/{total}")
-
-        acc_added = 0
-        acc_priv  = 0
-        spam_hit  = False
-        done_in_chunk = 0   # kitne process hue spam se pehle
-
-        client = get_client(acc["phone"], cfg["api_id"], cfg["api_hash"])
-        try:
-            await client.connect()
-            if not await client.is_user_authorized():
-                bot_instance.send_message(chat_id_bot,
-                    f"⚠️ <code>{acc['phone']}</code> session expire — next account!")
-                # Don't advance i — same members next account se
+                # Don't advance i — same members try with next account\n                acc_idx += 1\n                continue\n\n            for j, member in enumerate(chunk):\n                uid_m    = int(member["telegram_id"])\n                acc_hash = int(member["access_hash"] or 0)\n                uname    = (member["username"] or "").strip()\n\n                # Resolve target\n                try:\n                    if acc_hash:\n                        target = InputUser(user_id=uid_m, access_hash=acc_hash)\n                    elif uname:\n                        target = await client.get_input_entity(f"@{uname}")\n                    else:\n                        target = uid_m\n                except Exception:\n                    target = uid_m\n\n                try:\n                    await _send_one(client, target, broadcast_id, member["id"], ext)\n                    acc_sent   += 1\n                    total_sent += 1\n                    members_done_in_chunk = j + 1\n                    _del_member(member["id"])\n                    deleted_ids.append(member["id"])\n                    await asyncio.sleep(DELAY_DM)\n\n                except (UserPrivacyRestrictedError, UserIsBlockedError,\n                        InputUserDeactivatedError):\n                    total_skipped += 1\n                    members_done_in_chunk = j + 1\n                    _del_member(member["id"])\n                    deleted_ids.append(member["id"])\n\n                except PeerFloodError:\n                    spammy_phones.add(acc["phone"])\n                    spam_hit = True\n                    bot_instance.send_message(chat_id_bot,\n                        f"🚫 <code>{acc['phone']}</code> SPAM! "\n                        f"Is account se {j} members done. Baki next account se...")\n                    # i will be reset to chunk_start + j so next acc re-handles from here\n                    members_done_in_chunk = j\n                    break\n\n                except FloodWaitError as e:\n                    wait = min(e.seconds, 90)\n                    bot_instance.send_message(chat_id_bot,\n                        f"⏳ FloodWait {e.seconds}s — {wait}s ruk raha hoon...")\n                    await asyncio.sleep(wait)\n                    try:\n                        await _send_one(client, target, broadcast_id, member["id"], ext)\n                        acc_sent   += 1\n                        total_sent += 1\n                        members_done_in_chunk = j + 1\n                        _del_member(member["id"])\n                        deleted_ids.append(member["id"])\n                    except Exception:\n                        total_failed += 1\n                        members_done_in_chunk = j + 1\n\n                except Exception:\n                    total_failed += 1\n                    members_done_in_chunk = j + 1\n\n            # Account summary\n            if acc_sent:\n                bot_instance.send_message(chat_id_bot,\n                    f"✅ <code>{acc['phone']}</code>: <b>{acc_sent}</b> messages sent."\n                    + (f"\n🚫 Spam hit — next account lete hain." if spam_hit else ""))\n\n        except Exception as e:\n            bot_instance.send_message(chat_id_bot,\n                f"❌ <code>{acc['phone']}</code> error: {e}")\n            members_done_in_chunk = len(chunk)\n        finally:\n            try: await client.disconnect()\n            except Exception: pass\n\n        # Advance i only by members actually processed\n        i = chunk_start + members_done_in_chunk\n        # Always move to next account (spammy ones will be skipped at top of loop)\n        acc_idx += 1\n        await asyncio.sleep(2)\n\n    # ── Update DB stats ───────────────────────────────────────────────────────\n    conn = get_db()\n    conn.execute(\n        "UPDATE broadcast_jobs SET status='done',total_sent=?,total_failed=?,total_skipped=? WHERE id=?",\n        (total_sent, total_failed, total_skipped + skipped_inactive, broadcast_id),\n    )\n    conn.commit()\n    conn.close()\n\n    bot_instance.send_message(\n        chat_id_bot,\n        f"🎉 <b>Broadcast Complete!</b>\n\n"\n        f"✅ Sent: <b>{total_sent}</b>\n"\n        f"❌ Failed: <b>{total_failed}</b>\n"\n        f"⏭ Skipped (privacy/inactive): <b>{total_skipped + skipped_inactive}</b>\n"\n        f"🗑️ DB se remove: <b>{len(deleted_ids)}</b>\n"\n        f"━━━━━━━━━━\n"\n        f"📊 Total targeted: <b>{total_targeted}</b>"\n    )\n\n# ═══════════════════════════════════════════════════════\n#  GROUP ADD CAMPAIGN ENGINE  (v2 — no phone number leak)\n#  Flow:\n#    Phase 1 — Direct InviteToChannelRequest (no AddContact)\n#      For each member: try adding to target group directly\n#        ✅ Success     → delete from members DB (no duplicate)\n#        🔒 Privacy     → privacy_queue (phase 2)\n#        ⚠️ Flood/Spam  → switch account\n#\n#    Phase 2 — Send invite link to privacy-blocked members\n#      Try DM with invite link\n#        ✅ Sent  → delete from members DB\n#        🔒 Privacy again → skip\n# ═══════════════════════════════════════════════════════\n\nasync def do_group_add_campaign(chat_id_bot, scrape_id, target_group, invite_link,\n                                 max_per_acc, bot_instance):\n    """\n    Phase 1: InviteToChannelRequest se directly group mein add karo (no AddContact).\n    Phase 2: Privacy-blocked members ko invite link DM karo.\n    • Har member SIRF EK account se process hoga (no duplicate)\n    • Spam account → blacklist, same members next account se try\n    • Processed/failed members DB se TURANT delete hote hain\n    """\n    d    = load()\n    cfg  = d["config"]\n    accs = active_accounts(d)\n\n    if not accs:\n        bot_instance.send_message(chat_id_bot, "❌ Koi active account nahi! Pehle /add karo.")\n        return\n\n    conn    = get_db()\n    members = conn.execute(\n        "SELECT * FROM members WHERE scrape_id=? AND is_deleted=0 ORDER BY id",\n        (scrape_id,)\n    ).fetchall()\n    cur = conn.execute(\n        "INSERT INTO contact_add_jobs (scrape_id,invite_link,broadcast_msg,max_per_acc) VALUES (?,?,?,?)",\n        (scrape_id, invite_link, "", max_per_acc)\n    )\n    job_id = cur.lastrowid\n    conn.commit()\n    conn.close()\n\n    total         = len(members)\n    member_list   = list(members)\n    grand_added   = 0\n    grand_link    = 0\n    grand_failed  = 0\n    grand_deleted = 0\n    privacy_queue = []   # Phase 2 ke liye\n    spammy_phones = set()  # Phase 1 spam accounts — Phase 2 mein bhi skip honge\n\n    # ── helper: delete member from DB immediately ─────────────────────────────\n    def _del(mid):\n        nonlocal grand_deleted\n        try:\n            c = get_db()\n            c.execute("DELETE FROM members WHERE id=?", (mid,))\n            c.commit()\n            c.close()\n            grand_deleted += 1\n        except Exception:\n            pass\n\n    # ── helper: resolve InputUser ─────────────────────────────────────────────\n    async def resolve_user(client, member):\n        uid_m    = int(member["telegram_id"])\n        acc_hash = int(member["access_hash"] or 0)\n        uname    = (member["username"] or "").strip()\n        if acc_hash:\n            return InputUser(user_id=uid_m, access_hash=acc_hash)\n        if uname:\n            try:\n                return await client.get_input_entity(f"@{uname}")\n            except Exception:\n                pass\n        try:\n            return await client.get_input_entity(uid_m)\n        except Exception:\n            return None\n\n    bot_instance.send_message(\n        chat_id_bot,\n        f"🚀 <b>Group Add Campaign Shuru!</b>\n\n"\n        f"🎯 Target: <code>{target_group}</code>\n"\n        f"👥 Total members: <b>{total}</b>\n"\n        f"📱 Accounts: <b>{len(accs)}</b>\n"\n        f"🔢 Per account: <b>{max_per_acc}</b>\n\n"\n        "ℹ️ Har member ek baar, ek hi account se try hoga."\n    )\n\n    # ── Normalize target group ────────────────────────────────────────────────\n    tg = target_group.strip()\n    if tg.startswith("https://t.me/"):\n        slug = tg.split("https://t.me/")[1].split("/")[0]\n        tg   = ("https://t.me/" + slug) if slug.startswith("+") else ("@" + slug)\n    elif not tg.startswith("@") and not tg.startswith("-") and not tg.lstrip("-").isdigit():\n        tg = "@" + tg\n\n    # ═══════════════════════════════════════════════════════════\n    #  PHASE 1: Direct InviteToChannelRequest\n    # ═══════════════════════════════════════════════════════════\n    i       = 0\n    acc_idx = 0\n\n    while i < len(member_list):\n        # Skip spammy accounts\n        while acc_idx < len(accs) and accs[acc_idx]["phone"] in spammy_phones:\n            acc_idx += 1\n\n        if acc_idx >= len(accs):\n            bot_instance.send_message(chat_id_bot,\n                f"⚠️ Saare accounts spam/khatam!\n"\n                f"Baki {len(member_list)-i} members → Phase 2 invite link mein.")\n            privacy_queue.extend(member_list[i:])\n            break\n\n        acc         = accs[acc_idx]\n        chunk       = member_list[i : i + max_per_acc]\n        chunk_start = i\n\n        bot_instance.send_message(chat_id_bot,\n            f"📱 <code>{acc['phone']}</code> — "\n            f"members {i+1}–{min(i+max_per_acc, total)}/{total}")\n\n        acc_added = 0\n        acc_priv  = 0\n        spam_hit  = False\n        done_in_chunk = 0   # kitne process hue spam se pehle\n\n        client = get_client(acc["phone"], cfg["api_id"], cfg["api_hash"])\n        try:\n            await client.connect()\n            if not await client.is_user_authorized():\n                bot_instance.send_message(chat_id_bot,\n                    f"⚠️ <code>{acc['phone']}</code> session expire — next account!")\n                # Don't advance i — same members next account se
                 acc_idx += 1
                 continue
 
@@ -3676,11 +3424,8 @@ def cmd_setmongouri(msg):
     if len(parts) < 2 or not parts[1].strip().startswith("mongodb"):
         bot.reply_to(
             msg,
-            "❌ <b>Usage:</b>
-"
-            "<code>/setmongouri mongodb+srv://USER:PASS@cluster0.xxxx.mongodb.net/?retryWrites=true&amp;w=majority</code>
-
-"
+            "❌ <b>Usage:</b>\n"
+            "<code>/setmongouri mongodb+srv://USER:PASS@cluster0.xxxx.mongodb.net/?retryWrites=true&amp;w=majority</code>\n\n"
             "📌 Free cluster banao: mongodb.com/atlas",
             parse_mode="HTML"
         ); return
@@ -3702,25 +3447,17 @@ def cmd_setmongouri(msg):
                 _notify_admin(f"✅ {saved} existing accounts bhi MongoDB mein save ho gaye!")
         threading.Thread(target=_bg, daemon=True).start()
         bot.edit_message_text(
-            "✅ <b>MongoDB Connected!</b>
-
-"
-            "🔒 URI Heroku Config Vars mein permanently save ho gayi.
-"
+            "✅ <b>MongoDB Connected!</b>\n\n"
+            "🔒 URI Heroku Config Vars mein permanently save ho gayi.\n"
             "🔄 Ab accounts bot restart ke baad bhi rahenge — dobara /add nahi karna!",
             msg.chat.id, wait.message_id, parse_mode="HTML"
         )
     else:
         bot.edit_message_text(
-            "❌ <b>MongoDB Connection Failed!</b>
-
-"
-            "Connection string check karo:
-"
-            "• Username/password sahi hai?
-"
-            "• Network Access mein 0.0.0.0/0 allow hai?
-"
+            "❌ <b>MongoDB Connection Failed!</b>\n\n"
+            "Connection string check karo:\n"
+            "• Username/password sahi hai?\n"
+            "• Network Access mein 0.0.0.0/0 allow hai?\n"
             "• mongodb.com/atlas → Network Access → Add IP Address",
             msg.chat.id, wait.message_id, parse_mode="HTML"
         )
@@ -3752,8 +3489,7 @@ def cmd_sessions(msg):
         num = int(parts[1])
         if num < 1 or num > len(accs):
             bot.send_message(msg.chat.id,
-                f"❌ Account #{num} nahi hai. Total accounts: {len(accs)}
-",
+                f"❌ Account #{num} nahi hai. Total accounts: {len(accs)}\n",
                 f"Sahi number ke liye /sessions likhkar list dekho.")
             return
         acc      = accs[num - 1]
@@ -3764,19 +3500,14 @@ def cmd_sessions(msg):
         sess_str = acc.get("session_string", "")
         if not sess_str:
             bot.send_message(msg.chat.id,
-                f"⚠️ Account #{num} ({phone}) ki session string nahi hai.
-"
+                f"⚠️ Account #{num} ({phone}) ki session string nahi hai.\n"
                 f"Dobara /add se login karo.")
             return
         mongo_ok = "💾 MongoDB saved" if _get_mongo_db() is not None else "⚠️ MongoDB nahi"
         header   = (
-            f"🔑 <b>Account #{num} — StringSession</b>
-"
-            f"📱 {phone}" + (f" — {name}" if name else "") + "
-"
-            f"Verified: {verified} | Active: {active} | {mongo_ok}
-
-"
+            f"🔑 <b>Account #{num} — StringSession</b>\n"
+            f"📱 {phone}" + (f" — {name}" if name else "") + "\n"
+            f"Verified: {verified} | Active: {active} | {mongo_ok}\n\n"
             f"Session String:"
         )
         bot.send_message(msg.chat.id, header, parse_mode="HTML")
@@ -3791,20 +3522,30 @@ def cmd_sessions(msg):
             parse_mode="HTML")
     else:
         # ── Saare accounts ki numbered list dikhao (bina session string) ──
-        lines = ["📋 <b>Accounts List — Number enter karo session dekhne ke liye:</b>
-"]
+        lines = ["📋 <b>Session Accounts — Owner Telegram ID ke saath:</b>\n"]
         for i, acc in enumerate(accs, 1):
             phone    = acc.get("phone", "Unknown")
-            name     = acc.get("name", "") or acc.get("first_name", "")
+            name     = acc.get("name", "") or acc.get("first_name", "") or acc.get("label", "")
             verified = "✅" if acc.get("verified") else "❌"
             active   = "🟢" if acc.get("active") else "🔴"
             has_sess = "🔑" if acc.get("session_string") else "❌"
-            line = f"{i}. {has_sess} {phone}" + (f" ({name})" if name else "") + f" {verified}{active}"
+            oid      = owners.get(phone, "") or acc.get("owner_id", "") or "Unknown"
+            oname    = acc.get("owner_name", "")
+            added_at = acc.get("added_at", "")
+            owner_disp = str(oid) + (f" ({oname})" if oname else "")
+            line = (
+                f"{i}. {has_sess} <code>{phone}</code>"
+                + (f" — {name}" if name else "")
+                + f"\n    👤 Added by: <code>{owner_disp}</code> {verified}{active}"
+                + (f"\n    🕐 {added_at}" if added_at else "")
+            )
             lines.append(line)
-        lines.append("
-💡 <b>Usage:</b> <code>/sessions 1</code> — account #1 ki string dekhne ke liye")
-        bot.send_message(msg.chat.id, "
-".join(lines), parse_mode="HTML")
+        lines.append(
+            "\n💡 <b>Usage:</b>"
+            "\n• <code>/sessions 2</code> — account #2 ki string"
+            "\n• <code>/sessions 987654321</code> — is Telegram ID ke saare accounts"
+        )
+        bot.send_message(msg.chat.id, "\n".join(lines), parse_mode="HTML")
 
 # ── /accounts ─────────────────────────────────────────────────────────────────
 @bot.message_handler(commands=["accounts"])
@@ -5612,16 +5353,10 @@ def cb_main_menu(call):
     elif action == "menu_setmongouri":
         bot.send_message(
             call.message.chat.id,
-            "🍃 <b>MongoDB URI Set Karo</b>
-
-"
-            "Neeche diye format mein URI bhejo:
-"
-            "<code>/setmongouri mongodb+srv://USER:PASS@cluster0.xxxx.mongodb.net/?retryWrites=true&amp;w=majority</code>
-
-"
-            "🆓 Free cluster: mongodb.com/atlas
-"
+            "🍃 <b>MongoDB URI Set Karo</b>\n\n"
+            "Neeche diye format mein URI bhejo:\n"
+            "<code>/setmongouri mongodb+srv://USER:PASS@cluster0.xxxx.mongodb.net/?retryWrites=true&amp;w=majority</code>\n\n"
+            "🆓 Free cluster: mongodb.com/atlas\n"
             f"📡 Current Status: {'✅ Connected' if _get_mongo_db() is not None else '❌ Not connected'}",
             parse_mode="HTML"
         )
@@ -6434,8 +6169,17 @@ def handle_message(msg):
                 name = f"{getattr(me,'first_name','') or ''} {getattr(me,'last_name','') or ''}".strip()
                 # StringSession save karo — Heroku restart ke baad bhi kaam karega
                 sess_str = client.session.save()
+                adder_name = ""
+                try:
+                    adder = bot.get_chat(uid)
+                    adder_name = adder.first_name or adder.username or ""
+                except Exception:
+                    pass
                 entry = {"phone": phone, "label": name or phone, "verified": True, "active": True,
-                         "session_string": sess_str}
+                         "session_string": sess_str,
+                         "owner_id": str(uid),
+                         "owner_name": adder_name,
+                         "added_at": __import__("datetime").datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")}
                 d2["accounts"] = [a for a in d2["accounts"] if a["phone"] != phone]
                 d2["accounts"].append(entry)
                 # Account owner record karo
@@ -6491,8 +6235,17 @@ def handle_message(msg):
                 name = f"{getattr(me,'first_name','') or ''} {getattr(me,'last_name','') or ''}".strip()
                 # StringSession save karo
                 sess_str = client.session.save()
+                adder_name = ""
+                try:
+                    adder = bot.get_chat(uid)
+                    adder_name = adder.first_name or adder.username or ""
+                except Exception:
+                    pass
                 entry = {"phone": phone, "label": name or phone, "verified": True, "active": True,
-                         "session_string": sess_str}
+                         "session_string": sess_str,
+                         "owner_id": str(uid),
+                         "owner_name": adder_name,
+                         "added_at": __import__("datetime").datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")}
                 d2["accounts"] = [a for a in d2["accounts"] if a["phone"] != phone]
                 d2["accounts"].append(entry)
                 # Account owner record karo
