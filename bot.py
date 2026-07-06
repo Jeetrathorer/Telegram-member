@@ -3136,8 +3136,15 @@ def main_kb():
     kb.row(KeyboardButton("📋 History"),   KeyboardButton("❓ Help"))
     return kb
 
-def main_inline_kb():
-    """Inline keyboard with all main commands — use this for menu messages."""
+def main_inline_kb(uid=None):
+    """Inline keyboard with main commands — use this for menu messages.
+
+    Master/admin-only settings (Force Join, Music Bots, MongoDB URI, Sessions)
+    are only shown when the caller is the Main Master. Regular users and
+    User Masters only see the buttons that are actually usable by them.
+    """
+    is_main = bool(uid is not None and is_main_master(uid))
+
     kb = InlineKeyboardMarkup(row_width=2)
     kb.add(
         InlineKeyboardButton("📢 Broadcast",    callback_data="menu_broadcast"),
@@ -3175,14 +3182,17 @@ def main_inline_kb():
         InlineKeyboardButton("📋 History",      callback_data="menu_history"),
         InlineKeyboardButton("❓ Help",         callback_data="menu_help"),
     )
-    kb.add(
-        InlineKeyboardButton("🔗 Force Join",   callback_data="menu_forcejoin"),
-        InlineKeyboardButton("🎵 Music Bots",   callback_data="menu_musicbots"),
-    )
-    kb.add(
-        InlineKeyboardButton("🍃 MongoDB URI",  callback_data="menu_setmongouri"),
-        InlineKeyboardButton("🔑 Sessions",     callback_data="menu_sessions"),
-    )
+
+    # ── Main Master only settings ──────────────────────────────────────────
+    if is_main:
+        kb.add(
+            InlineKeyboardButton("🔗 Force Join",   callback_data="menu_forcejoin"),
+            InlineKeyboardButton("🎵 Music Bots",   callback_data="menu_musicbots"),
+        )
+        kb.add(
+            InlineKeyboardButton("🍃 MongoDB URI",  callback_data="menu_setmongouri"),
+            InlineKeyboardButton("🔑 Sessions",     callback_data="menu_sessions"),
+        )
     return kb
 
 def cancel_kb():
@@ -3255,7 +3265,7 @@ def cmd_start(msg):
             "\U0001f451 <b>Main Master</b> \u2014 Full Access\n\n"
             "\U0001f916 <b>Telegram Master Bot</b>\n\n"
             "Niche buttons se koi bhi feature choose karo:",
-            reply_markup=main_inline_kb(),
+            reply_markup=main_inline_kb(uid),
         )
         if cfg.get("force_join_groups"):
             run_force_join_all(chat_id_report=None)
@@ -3333,7 +3343,7 @@ def cmd_start(msg):
     else:
         bot.send_message(msg.chat.id,
             "\U0001f3af <b>Feature choose karo | Choose a feature:</b>",
-            reply_markup=main_inline_kb(), parse_mode="HTML")
+            reply_markup=main_inline_kb(uid), parse_mode="HTML")
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "after_join_start")
@@ -3342,7 +3352,7 @@ def cb_after_join_start(call):
     bot.send_message(
         call.message.chat.id,
         "🎯 <b>Feature choose karo | Choose a feature:</b>",
-        reply_markup=main_inline_kb(),
+        reply_markup=main_inline_kb(call.from_user.id),
         parse_mode="HTML"
     )
 
