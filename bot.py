@@ -1245,13 +1245,18 @@ async def run_tagall_all_groups(payload, progress_cb=None):
 #  AUTO-LEAVE INACTIVE/BANNED GROUPS ENGINE
 # ═══════════════════════════════════════════════════════
 
-async def run_auto_leave_inactive(progress_cb=None):
+async def run_auto_leave_inactive(progress_cb=None, owner_uid=None):
     from telethon.tl.types import Channel, Chat as TLChat
     data     = load()
     cfg      = data["config"]
     api_id   = cfg.get("api_id", 0)
     api_hash = cfg.get("api_hash", "")
-    active   = [a for a in data["accounts"] if a.get("active") and a.get("verified")]
+    if owner_uid is not None and not is_main_master(owner_uid):
+        allowed = {a["phone"] for a in get_user_accounts(owner_uid)}
+        active  = [a for a in data["accounts"]
+                   if a.get("active") and a.get("verified") and a["phone"] in allowed]
+    else:
+        active = [a for a in data["accounts"] if a.get("active") and a.get("verified")]
     if not active or not api_id:
         return {"ok": False, "error": "Active account ya API credentials nahi hain!"}
 
@@ -4059,13 +4064,10 @@ def cmd_targeted(msg):
 @bot.message_handler(commands=["exportcsv"])
 @bot.message_handler(func=lambda m: m.text == "📤 Export CSV")
 def cmd_exportcsv(msg):
-    if not is_admin(msg.from_user.id):
+    uid = msg.from_user.id
+    if not check_user_access(uid):
         bot.reply_to(msg, "❌ Access denied!"); return
-    conn = get_db()
-    jobs = conn.execute(
-        "SELECT * FROM scrape_jobs WHERE status='done' ORDER BY id DESC LIMIT 15"
-    ).fetchall()
-    conn.close()
+    jobs = get_user_scrape_jobs(uid, limit=15)
     if not jobs:
         bot.send_message(msg.chat.id,
             "❌ Koi scrape job nahi mili! Pehle /scrape karo.", reply_markup=main_kb())
@@ -4082,14 +4084,20 @@ def cmd_exportcsv(msg):
         reply_markup=mk)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("csv_job_"))
-@admin_only_cb
+@user_access_cb
 def cb_csv_job(call):
     import csv, io, os, tempfile
     bot.answer_callback_query(call.id, "⏳ CSV bana raha hoon...")
+    uid = call.from_user.id
     jid = int(call.data.split("_")[-1])
 
     conn = get_db()
     job  = conn.execute("SELECT * FROM scrape_jobs WHERE id=?", (jid,)).fetchone()
+    if job and job["owner_id"] and not is_main_master(uid):
+        if str(job["owner_id"]) != str(uid):
+            conn.close()
+            bot.send_message(call.message.chat.id, "❌ Ye scrape job aapki nahi hai!")
+            return
     rows = conn.execute(
         """SELECT telegram_id, username, first_name, last_name,
                   is_active, last_seen
@@ -4150,9 +4158,10 @@ def cb_csv_job(call):
 @bot.message_handler(commands=["checkaccount"])
 @bot.message_handler(func=lambda m: m.text == "🔎 Check Limit")
 def cmd_checkaccount(msg):
-    if not is_admin(msg.from_user.id):
+    uid = msg.from_user.id
+    if not check_user_access(uid):
         bot.reply_to(msg, "❌ Access denied!"); return
-    accs = active_accounts()
+    accs = get_user_accounts(uid)
     if not accs:
         bot.send_message(msg.chat.id,
             "❌ Koi active account nahi! Pehle /add karo.", reply_markup=main_kb())
@@ -4250,14 +4259,15 @@ async def _check_one_account_spambot(phone, api_id, api_hash):
     return result
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("chkac_"))
-@admin_only_cb
+@user_access_cb
 def cb_chkac(call):
     bot.answer_callback_query(call.id, "⏳ Check ho raha hai...")
+    uid = call.from_user.id
     target = call.data.replace("chkac_", "")
     chat_id = call.message.chat.id
 
     d2   = load()
-    accs = active_accounts(d2)
+    accs = get_user_accounts(uid)
     if target == "ALL":
         check_list = accs
         bot.send_message(chat_id,
@@ -4619,29 +4629,40 @@ def cb_ga_confirm(call):
 @bot.message_handler(commands=["history"])
 @bot.message_handler(func=lambda m: m.text == "📋 History")
 def cmd_history(msg):
-    if not is_admin(msg.from_user.id):
+    uid    = msg.from_user.id
+    access = check_user_access(uid)
+    if not access:
         bot.reply_to(msg, "❌ Access denied!"); return
 
-    text = "📋 <b>Broadcast History</b>\n\n"
+    is_mm = (access == "main_master")
+    text  = "📋 <b>Broadcast History</b>\n\n"
 
-    # Dialog broadcast history (JSON)
-    d    = load()
-    hist = d["history"][:5]
-    if hist:
-        text += "<b>📢 Dialog Broadcasts (last 5):</b>\n"
-        for r in hist:
-            dt  = r["sentAt"][:16].replace("T", " ")
-            mp  = r["message"][:20] + ("..." if len(r["message"]) > 20 else "")
-            text += f"• {dt} ✅{r['totalSent']} ❌{r['totalFailed']}\n  <i>{mp}</i>\n"
-    else:
-        text += "<b>📢 Dialog Broadcasts:</b> Koi nahi abhi tak.\n"
+    # Dialog broadcast history (JSON) — sirf Main Master ko dikhta hai (global, per-user tag nahi hai)
+    if is_mm:
+        d    = load()
+        hist = d["history"][:5]
+        if hist:
+            text += "<b>📢 Dialog Broadcasts (last 5):</b>\n"
+            for r in hist:
+                dt  = r["sentAt"][:16].replace("T", " ")
+                mp  = r["message"][:20] + ("..." if len(r["message"]) > 20 else "")
+                text += f"• {dt} ✅{r['totalSent']} ❌{r['totalFailed']}\n  <i>{mp}</i>\n"
+        else:
+            text += "<b>📢 Dialog Broadcasts:</b> Koi nahi abhi tak.\n"
+        text += "\n"
 
-    text += "\n"
-
-    # Targeted DM history (SQLite)
+    # Targeted DM history (SQLite) — apni jobs (Main Master ko sab)
     try:
         conn  = get_db()
-        bc_jobs = conn.execute("SELECT * FROM broadcast_jobs ORDER BY id DESC LIMIT 5").fetchall()
+        if is_mm:
+            bc_jobs = conn.execute("SELECT * FROM broadcast_jobs ORDER BY id DESC LIMIT 5").fetchall()
+        else:
+            bc_jobs = conn.execute(
+                "SELECT bj.* FROM broadcast_jobs bj "
+                "JOIN scrape_jobs sj ON sj.id = bj.scrape_id "
+                "WHERE sj.owner_id=? ORDER BY bj.id DESC LIMIT 5",
+                (str(uid),)
+            ).fetchall()
         conn.close()
         if bc_jobs:
             text += "<b>🎯 Targeted DM Jobs (last 5):</b>\n"
@@ -4779,7 +4800,7 @@ def cmd_tagallgroups(msg):
 # ── /autoclean ────────────────────────────────────────────────────────────────
 @bot.message_handler(commands=["autoclean"])
 def cmd_autoclean(msg):
-    if not is_admin(msg.from_user.id):
+    if not check_user_access(msg.from_user.id):
         bot.reply_to(msg, "❌ Access denied!"); return
     kb = make_inline([
         [("🧹 Haan, Clean Karo!", "autoclean_confirm")],
@@ -5850,7 +5871,7 @@ def handle_callback(call):
             except Exception: pass
 
         def do_clean():
-            result = run_async(run_auto_leave_inactive(progress_cb=on_clean_progress))
+            result = run_async(run_auto_leave_inactive(progress_cb=on_clean_progress, owner_uid=uid))
             if not result["ok"]:
                 bot.edit_message_text(f"❌ <b>Clean fail!</b>\n{result['error']}",
                                       call.message.chat.id, _st2_cl.message_id); return
