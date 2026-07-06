@@ -218,7 +218,9 @@ def _mongo_set_uri(uri):
     1. os.environ update karo
     2. Connection reset karo (naya connection use karega)
     3. Heroku Config Var mein permanent save karo
-    4. Local fallback file mein bhi save karo
+    4. Local fallback file mein bhi save karo (ephemeral — Heroku restart pe wipe hoti hai)
+
+    Returns: (connected: bool, persisted_to_heroku: bool)
     """
     global _mongo_client, _mongo_db
     uri = uri.strip()
@@ -231,9 +233,11 @@ def _mongo_set_uri(uri):
         pass
     _mongo_client = None
     _mongo_db     = None
-    # Heroku mein permanent save karo
-    _heroku_save_config_var("MONGODB_URI", uri)
-    # Local fallback file (ephemeral but helps current session)
+    # Heroku mein permanent save karo — sirf tabhi persist hoga jab
+    # HEROKU_API_KEY + HEROKU_APP_NAME env vars already set hon.
+    persisted = _heroku_save_config_var("MONGODB_URI", uri)
+    # Local fallback file (ephemeral — sirf current dyno session ke liye,
+    # Heroku restart/deploy pe filesystem wipe ho jaata hai)
     try:
         cfg_file = os.path.join(BASE_DIR, ".mongo_uri")
         os.makedirs(BASE_DIR, exist_ok=True)
@@ -243,7 +247,7 @@ def _mongo_set_uri(uri):
         pass
     # Test connection
     db = _get_mongo_db()
-    return db is not None
+    return (db is not None, persisted)
 
 def _mongo_save_account(acc, owner_id=""):
     """Ek account (with session_string) MongoDB mein save/update karo."""
@@ -1685,11 +1689,15 @@ def _check_mongodb_on_startup():
             return   # already connected, no need to notify
         msg = (
             "⚠️ <b>MongoDB URI Set Nahi Hai!</b>\n\n"
-            "Accounts Heroku restart ke baad wipe ho jaayenge.\n\n"
+            "Accounts Heroku restart/redeploy ke baad wipe ho jaayenge.\n\n"
             "<b>Fix karo — bot ko yeh message bhejo:</b>\n"
             "<code>/setmongouri mongodb+srv://USER:PASS@cluster0.xxxx.mongodb.net/?retryWrites=true&amp;w=majority</code>\n\n"
             "🆓 Free cluster: mongodb.com/atlas\n"
-            "📌 MONGODB_URI Heroku mein permanently save ho jaayegi — sirf ek baar karna hai!"
+            "📌 Agar bot ne pehle bhi ye baar-baar maanga hai, toh iska matlab URI"
+            " permanently save nahi ho paa raha. Command chalane ke baad bot batayega"
+            " ki save pakka permanent hua ya nahi — agar nahi hua, toh Heroku Dashboard"
+            " → Settings → Config Vars mein khud <code>MONGODB_URI</code> add karo,"
+            " ya <code>HEROKU_API_KEY</code> + <code>HEROKU_APP_NAME</code> set karke dobara try karo."
         )
         _notify_admin(msg)
     threading.Thread(target=_run, daemon=True, name="mongo-startup-check").start()
@@ -3654,8 +3662,8 @@ def cmd_setmongouri(msg):
         ); return
     uri  = parts[1].strip()
     wait = bot.reply_to(msg, "⏳ MongoDB se connect ho raha hoon...")
-    ok   = _mongo_set_uri(uri)
-    if ok:
+    connected, persisted = _mongo_set_uri(uri)
+    if connected and persisted:
         # Existing accounts bhi MongoDB mein push karo
         def _bg():
             d = load()
@@ -3672,7 +3680,30 @@ def cmd_setmongouri(msg):
         bot.edit_message_text(
             "✅ <b>MongoDB Connected!</b>\n\n"
             "🔒 URI Heroku Config Vars mein permanently save ho gayi.\n"
-            "🔄 Ab accounts bot restart ke baad bhi rahenge — dobara /add nahi karna!",
+            "🔄 Ab accounts bot restart/redeploy ke baad bhi rahenge — dobara /add nahi karna!",
+            msg.chat.id, wait.message_id, parse_mode="HTML"
+        )
+    elif connected and not persisted:
+        # Existing accounts bhi MongoDB mein push karo (connection to chal raha hai)
+        def _bg():
+            d = load()
+            owners = d.get("account_owners", {})
+            for acc in d.get("accounts", []):
+                acc_copy = dict(acc)
+                acc_copy["owner_id"] = owners.get(acc_copy.get("phone",""), "")
+                _mongo_save_account(acc_copy, owner_id=acc_copy["owner_id"])
+        threading.Thread(target=_bg, daemon=True).start()
+        bot.edit_message_text(
+            "⚠️ <b>MongoDB Connected — LEKIN permanently save NAHI hui!</b>\n\n"
+            "Connection abhi chal raha hai, par restart/redeploy hote hi ye URI"
+            " bhool jaayega kyunki bot Heroku Config Vars mein khud isko"
+            " save nahi kar paaya (HEROKU_API_KEY / HEROKU_APP_NAME set nahi hai).\n\n"
+            "📌 <b>Permanent fix (ek baar karo):</b>\n"
+            "1️⃣ Heroku Dashboard → Aapki App → Settings → Config Vars khol,\n"
+            "    <code>MONGODB_URI</code> key ke saath yahi URI wahan manually add karo.\n\n"
+            "<b>Ya phir</b> bot ko khud auto-save karne dene ke liye Config Vars mein\n"
+            "<code>HEROKU_API_KEY</code> aur <code>HEROKU_APP_NAME</code> add karo,\n"
+            "phir dobara <code>/setmongouri</code> chalao.",
             msg.chat.id, wait.message_id, parse_mode="HTML"
         )
     else:
