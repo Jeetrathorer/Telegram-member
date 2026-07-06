@@ -3324,7 +3324,18 @@ def cmd_start(msg):
         join_kb.add(InlineKeyboardButton(
             "\u2705 Join kar liya \u2014 Start karo!", callback_data="after_join_start"))
 
-    # Welcome photo ya message bhejo
+    # ── Pehle Force Join prompt (agar groups set hain) ───────────────────────
+    if has_joins:
+        join_prompt = (
+            "\U0001f517 <b>Pehle ye groups join karo!</b>\n"
+            "<i>Please join these groups first:</i>\n\n"
+            + "\n".join(f"\u2022 {g}" for g in groups)
+            + "\n\nJoin karne ke baad \u2705 button dabao."
+        )
+        bot.send_message(msg.chat.id, join_prompt, reply_markup=join_kb, parse_mode="HTML")
+        return
+
+    # ── Koi force join nahi — seedha Welcome + Feature menu dikhao ───────────
     try:
         if photo_id:
             bot.send_photo(msg.chat.id, photo_id, caption=welcome_text, parse_mode="HTML")
@@ -3336,28 +3347,64 @@ def cmd_start(msg):
         except Exception:
             pass
 
-    # Force join prompt
-    if has_joins:
-        join_prompt = (
-            "\U0001f517 <b>Pehle ye groups join karo!</b>\n"
-            "<i>Please join these groups first:</i>\n\n"
-            + "\n".join(f"\u2022 {g}" for g in groups)
-            + "\n\nJoin karne ke baad \u2705 button dabao."
-        )
-        bot.send_message(msg.chat.id, join_prompt, reply_markup=join_kb, parse_mode="HTML")
-    else:
-        bot.send_message(msg.chat.id,
-            "\U0001f3af <b>Feature choose karo | Choose a feature:</b>",
-            reply_markup=main_inline_kb(uid), parse_mode="HTML")
+    bot.send_message(msg.chat.id,
+        "\U0001f3af <b>Feature choose karo | Choose a feature:</b>",
+        reply_markup=main_inline_kb(uid), parse_mode="HTML")
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "after_join_start")
 def cb_after_join_start(call):
     bot.answer_callback_query(call.id, "✅ Shukriya! Welcome aboard!")
+    uid  = call.from_user.id
+    name = call.from_user.first_name or "User"
+
+    d          = load()
+    cfg        = d["config"]
+    photo_id   = cfg.get("welcome_photo_id", "")
+    custom_cap = cfg.get("welcome_caption", "")
+
+    if custom_cap:
+        welcome_text = custom_cap.replace("{name}", name)
+    else:
+        welcome_text = (
+            f"\U0001f389 <b>Swagat hai, {name}!</b> | <b>Welcome, {name}!</b>\n\n"
+            "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+            "\U0001f916 <b>Telegram Master Bot</b>\n"
+            "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\n"
+            "\U0001f4cc <b>Aap kya kar sakte ho | What You Can Do:</b>\n\n"
+            "\U0001f50d <b>Scrape</b> \u2014 Kisi bhi group ke members nikalo\n"
+            "    <i>Extract members from any group</i>\n\n"
+            "\U0001f4e2 <b>Broadcast</b> \u2014 Members ko message bhejo\n"
+            "    <i>Send messages to scraped members</i>\n\n"
+            "\U0001f465 <b>Group Add</b> \u2014 Members ko apne group mein add karo\n"
+            "    <i>Add members directly to your group</i>\n\n"
+            "\u2694\ufe0f <b>Reply Raid</b> \u2014 Kisi message pe reply spam\n"
+            "    <i>Raid any message with replies</i>\n\n"
+            "\U0001f3f7 <b>Tag All</b> \u2014 Group mein sabko tag karo\n"
+            "    <i>Tag all members in a group</i>\n\n"
+            "\U0001f3b5 <b>Music Bots</b> \u2014 Group mein music bots add karo\n"
+            "    <i>Auto-add music bots to your group</i>\n\n"
+            "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+            "\u25b6\ufe0f <b>Shuru karne ke liye pehle account add karo!\n"
+            "    To start, first add your Telegram account!</b>\n"
+            "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501"
+        )
+
+    try:
+        if photo_id:
+            bot.send_photo(call.message.chat.id, photo_id, caption=welcome_text, parse_mode="HTML")
+        else:
+            bot.send_message(call.message.chat.id, welcome_text, parse_mode="HTML")
+    except Exception:
+        try:
+            bot.send_message(call.message.chat.id, welcome_text, parse_mode="HTML")
+        except Exception:
+            pass
+
     bot.send_message(
         call.message.chat.id,
-        "🎯 <b>Feature choose karo | Choose a feature:</b>",
-        reply_markup=main_inline_kb(call.from_user.id),
+        "\U0001f3af <b>Feature choose karo | Choose a feature:</b>",
+        reply_markup=main_inline_kb(uid),
         parse_mode="HTML"
     )
 
