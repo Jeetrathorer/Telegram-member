@@ -1711,6 +1711,11 @@ def _startup_all_userbots():
                 f"✅ {ok_count}/{len(accs)} accounts connected & watching!\n"
                 f"Ab /replyraid se kisi pe bhi raid chalaao."
             )
+        # Force Join — startup pe automatically run karo
+        groups = d["config"].get("force_join_groups", [])
+        if groups and ok_count:
+            time.sleep(2)
+            run_force_join_all(chat_id_report=None)
     threading.Thread(target=_run, daemon=True, name="userbot-startup").start()
 
 
@@ -3169,8 +3174,12 @@ def main_inline_kb():
         InlineKeyboardButton("❓ Help",         callback_data="menu_help"),
     )
     kb.add(
-        InlineKeyboardButton("🍃 Set MongoDB URI", callback_data="menu_setmongouri"),
-        InlineKeyboardButton("🔑 Sessions",        callback_data="menu_sessions"),
+        InlineKeyboardButton("🔗 Force Join",   callback_data="menu_forcejoin"),
+        InlineKeyboardButton("🎵 Music Bots",   callback_data="menu_musicbots"),
+    )
+    kb.add(
+        InlineKeyboardButton("🍃 MongoDB URI",  callback_data="menu_setmongouri"),
+        InlineKeyboardButton("🔑 Sessions",     callback_data="menu_sessions"),
     )
     return kb
 
@@ -5350,6 +5359,64 @@ def cb_main_menu(call):
                 'message_id': call.message.message_id
             })()
             cmd_sessions(fake2)
+    elif action == "menu_forcejoin":
+        if not is_main_master(call.from_user.id):
+            bot.answer_callback_query(call.id, "🔒 Sirf Main Master!", show_alert=True); return
+        d = load()
+        groups = d["config"].get("force_join_groups", [])
+        accs   = active_accounts()
+        curr_txt = "\n".join(f"• <code>{g}</code>" for g in groups) if groups else "❌ Koi group set nahi"
+        kb2 = InlineKeyboardMarkup()
+        if groups and accs:
+            kb2.add(InlineKeyboardButton("▶️ Abhi Force Join Karo", callback_data="do_forcejoin"))
+        kb2.add(InlineKeyboardButton("✏️ Groups Set Karo", callback_data="set_forcejoin_prompt"))
+        bot.send_message(
+            call.message.chat.id,
+            f"🔗 <b>Force Join Settings</b>\n\n"
+            f"<b>Current Groups:</b>\n{curr_txt}\n\n"
+            f"Active Accounts: {len(accs)}\n\n"
+            f"<b>Group set karne ke liye:</b>\n"
+            f"<code>/setforcejoin @group1, @group2</code>",
+            parse_mode="HTML", reply_markup=kb2
+        )
+    elif action == "do_forcejoin":
+        if not is_main_master(call.from_user.id): return
+        d = load()
+        groups = d["config"].get("force_join_groups", [])
+        accs   = active_accounts()
+        if not groups:
+            bot.answer_callback_query(call.id, "❌ Pehle /setforcejoin se groups set karo!", show_alert=True); return
+        if not accs:
+            bot.answer_callback_query(call.id, "❌ Koi active account nahi!", show_alert=True); return
+        bot.answer_callback_query(call.id, "⏳ Force Join shuru ho gaya...")
+        bot.send_message(call.message.chat.id,
+            f"🔗 Force Join chal raha hai...\n"
+            f"Groups: {', '.join(groups)}\n"
+            f"Accounts: {len(accs)}\n\n"
+            "⏳ Result thodi der mein aayega...")
+        run_force_join_all(chat_id_report=call.message.chat.id)
+    elif action == "set_forcejoin_prompt":
+        if not is_main_master(call.from_user.id): return
+        bot.send_message(call.message.chat.id,
+            "✏️ <b>Force Join Groups Set Karo:</b>\n\n"
+            "<code>/setforcejoin @group1, @group2, @group3</code>\n\n"
+            "Max 3 groups. Bot start hote hi saare accounts join karenge.",
+            parse_mode="HTML")
+    elif action == "menu_musicbots":
+        if not is_main_master(call.from_user.id):
+            bot.answer_callback_query(call.id, "🔒 Sirf Main Master!", show_alert=True); return
+        d    = load()
+        bots = d["config"].get("music_bot_usernames", [])
+        curr_txt = "\n".join(f"• <code>{b}</code>" for b in bots) if bots else "❌ Koi music bot set nahi"
+        bot.send_message(
+            call.message.chat.id,
+            f"🎵 <b>Music Bot Settings</b>\n\n"
+            f"<b>Current Bots:</b>\n{curr_txt}\n\n"
+            f"Yeh bots scrape se pehle target group mein automatically add kiye jaate hain.\n\n"
+            f"<b>Set karne ke liye:</b>\n"
+            f"<code>/setmusicbots @musicbot1, @musicbot2</code>",
+            parse_mode="HTML"
+        )
     elif action == "menu_setmongouri":
         bot.send_message(
             call.message.chat.id,
