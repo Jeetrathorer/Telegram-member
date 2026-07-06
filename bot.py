@@ -346,6 +346,8 @@ def load():
     cfg.setdefault("blacklist_groups", [])
     cfg.setdefault("promo_text", "")
     cfg.setdefault("promo_link", "")
+    cfg.setdefault("welcome_photo_id", "")
+    cfg.setdefault("welcome_caption", "")
     d.setdefault("account_owners", {})
     # ── MongoDB se accounts restore karo (Heroku restart pe file wipe hoti hai) ──
     if not d.get("accounts"):
@@ -3217,55 +3219,132 @@ def clear_state(uid):
 # ── /start ────────────────────────────────────────────────────────────────────
 @bot.message_handler(commands=["start"])
 def cmd_start(msg):
-    uid = msg.from_user.id
+    uid  = msg.from_user.id
     clear_state(uid)
     name = msg.from_user.first_name or "User"
 
     # Access level check — naya user hai toh auto User Master bana do
     access = check_user_access(uid)
     if not access:
-        # Auto-register as User Master
         d2  = load()
         ums = d2["config"].setdefault("user_masters", [])
         if uid not in ums:
             ums.append(uid)
             save(d2)
-            # Main Master ko notify karo
             try:
                 mm = get_main_master_id()
                 if mm and mm != uid:
                     bot.send_message(mm,
-                        f"🔔 <b>Naya User Master join kiya!</b>\n"
-                        f"👤 Name: <b>{name}</b>\n"
-                        f"🆔 ID: <code>{uid}</code>\n\n"
+                        f"\U0001f514 <b>Naya User join kiya!</b>\n"
+                        f"\U0001f464 Name: <b>{name}</b>\n"
+                        f"\U0001f194 ID: <code>{uid}</code>\n\n"
                         f"Hatane ke liye: <code>/removeusermaster {uid}</code>",
                         parse_mode="HTML")
             except Exception:
                 pass
         access = "user_master"
 
-    # Role badge
+    d   = load()
+    cfg = d["config"]
+
+    # ── MAIN MASTER: Full admin panel ────────────────────────────────────────
     if access == "main_master":
-        role_badge = "👑 <b>Main Master</b> (Full Access)"
-    elif access == "user_master":
-        role_badge = "🔑 <b>User Master</b> (Apne accounts)"
+        bot.send_message(
+            msg.chat.id,
+            f"\U0001f44b <b>Welcome back, {name}!</b>\n"
+            "\U0001f451 <b>Main Master</b> \u2014 Full Access\n\n"
+            "\U0001f916 <b>Telegram Master Bot</b>\n\n"
+            "Niche buttons se koi bhi feature choose karo:",
+            reply_markup=main_inline_kb(),
+        )
+        if cfg.get("force_join_groups"):
+            run_force_join_all(chat_id_report=None)
+        return
+
+    # ── USER MASTER: Beautiful Hindi+English Welcome ─────────────────────────
+    photo_id   = cfg.get("welcome_photo_id", "")
+    custom_cap = cfg.get("welcome_caption", "")
+
+    if custom_cap:
+        welcome_text = custom_cap.replace("{name}", name)
     else:
-        role_badge = "🔧 <b>Admin</b>"
+        welcome_text = (
+            f"\U0001f389 <b>Swagat hai, {name}!</b> | <b>Welcome, {name}!</b>\n\n"
+            "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+            "\U0001f916 <b>Telegram Master Bot</b>\n"
+            "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\n"
+            "\U0001f4cc <b>Aap kya kar sakte ho | What You Can Do:</b>\n\n"
+            "\U0001f50d <b>Scrape</b> \u2014 Kisi bhi group ke members nikalo\n"
+            "    <i>Extract members from any group</i>\n\n"
+            "\U0001f4e2 <b>Broadcast</b> \u2014 Members ko message bhejo\n"
+            "    <i>Send messages to scraped members</i>\n\n"
+            "\U0001f465 <b>Group Add</b> \u2014 Members ko apne group mein add karo\n"
+            "    <i>Add members directly to your group</i>\n\n"
+            "\u2694\ufe0f <b>Reply Raid</b> \u2014 Kisi message pe reply spam\n"
+            "    <i>Raid any message with replies</i>\n\n"
+            "\U0001f3f7 <b>Tag All</b> \u2014 Group mein sabko tag karo\n"
+            "    <i>Tag all members in a group</i>\n\n"
+            "\U0001f3b5 <b>Music Bots</b> \u2014 Group mein music bots add karo\n"
+            "    <i>Auto-add music bots to your group</i>\n\n"
+            "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+            "\u25b6\ufe0f <b>Shuru karne ke liye pehle account add karo!\n"
+            "    To start, first add your Telegram account!</b>\n"
+            "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501"
+        )
 
+    # Force join URL buttons banao
+    groups    = cfg.get("force_join_groups", [])
+    join_kb   = InlineKeyboardMarkup(row_width=1)
+    has_joins = False
+    for g in groups:
+        if g.startswith("@"):
+            url = f"https://t.me/{g.lstrip('@')}"
+        elif g.startswith("https://t.me/"):
+            url = g
+        else:
+            continue
+        join_kb.add(InlineKeyboardButton(f"\U0001f4e2 Join Group: {g}", url=url))
+        has_joins = True
+    if has_joins:
+        join_kb.add(InlineKeyboardButton(
+            "\u2705 Join kar liya \u2014 Start karo!", callback_data="after_join_start"))
+
+    # Welcome photo ya message bhejo
+    try:
+        if photo_id:
+            bot.send_photo(msg.chat.id, photo_id, caption=welcome_text, parse_mode="HTML")
+        else:
+            bot.send_message(msg.chat.id, welcome_text, parse_mode="HTML")
+    except Exception:
+        try:
+            bot.send_message(msg.chat.id, welcome_text, parse_mode="HTML")
+        except Exception:
+            pass
+
+    # Force join prompt
+    if has_joins:
+        join_prompt = (
+            "\U0001f517 <b>Pehle ye groups join karo!</b>\n"
+            "<i>Please join these groups first:</i>\n\n"
+            + "\n".join(f"\u2022 {g}" for g in groups)
+            + "\n\nJoin karne ke baad \u2705 button dabao."
+        )
+        bot.send_message(msg.chat.id, join_prompt, reply_markup=join_kb, parse_mode="HTML")
+    else:
+        bot.send_message(msg.chat.id,
+            "\U0001f3af <b>Feature choose karo | Choose a feature:</b>",
+            reply_markup=main_inline_kb(), parse_mode="HTML")
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "after_join_start")
+def cb_after_join_start(call):
+    bot.answer_callback_query(call.id, "✅ Shukriya! Welcome aboard!")
     bot.send_message(
-        msg.chat.id,
-        f"👋 <b>Welcome, {name}!</b>\n"
-        f"{role_badge}\n\n"
-        "🤖 <b>Telegram Master Bot</b>\n\n"
-        "Niche buttons se koi bhi feature choose karo:",
+        call.message.chat.id,
+        "🎯 <b>Feature choose karo | Choose a feature:</b>",
         reply_markup=main_inline_kb(),
+        parse_mode="HTML"
     )
-
-    # Force join background mein chala do (sirf Main Master start pe)
-    if access == "main_master":
-        d = load()
-        if d["config"].get("force_join_groups"):
-            run_force_join_all(chat_id_report=None)  # Silent background join
 
 # ── /help ─────────────────────────────────────────────────────────────────────
 @bot.message_handler(commands=["help"])
@@ -4687,6 +4766,73 @@ def cmd_autoclean(msg):
         "Aage badhoge?",
         reply_markup=kb,
     )
+
+# ── /setwelcomephoto ──────────────────────────────────────────────────────────
+@bot.message_handler(commands=["setwelcomephoto"])
+@bot.message_handler(func=lambda m: m.text and m.text.startswith("/setwelcomephoto"))
+def cmd_setwelcomephoto(msg):
+    if not is_main_master(msg.from_user.id):
+        bot.reply_to(msg, "❌ Sirf Main Master kar sakta hai!"); return
+    bot.send_message(msg.chat.id,
+        "📸 <b>Welcome Photo Set karo</b>\n\n"
+        "Ab koi bhi photo bhejo — woh sab user masters ko /start pe dikhegi.\n\n"
+        "Ya phir photo ki <b>file_id</b> text mein bhejo:\n"
+        "<code>/setwelcomephoto FILE_ID_HERE</code>\n\n"
+        "Photo hatane ke liye: <code>/setwelcomephoto remove</code>",
+        parse_mode="HTML")
+    parts = msg.text.split(None, 1)
+    if len(parts) > 1:
+        val = parts[1].strip()
+        if val.lower() == "remove":
+            d = load(); d["config"]["welcome_photo_id"] = ""; save(d)
+            bot.send_message(msg.chat.id, "🗑️ Welcome photo remove ho gaya.")
+        else:
+            d = load(); d["config"]["welcome_photo_id"] = val; save(d)
+            bot.send_message(msg.chat.id, f"✅ Welcome photo set! File ID: <code>{val}</code>", parse_mode="HTML")
+        return
+    bot.send_message(msg.chat.id, "📸 Photo bhejo (next message mein):")
+    set_state(msg.from_user.id, "setwelcomephoto", {})
+
+@bot.message_handler(content_types=["photo"])
+def handle_photo_upload(msg):
+    uid  = msg.from_user.id
+    step = get_state(uid)[0] if get_state(uid) else None
+    if step == "setwelcomephoto" and is_main_master(uid):
+        file_id = msg.photo[-1].file_id
+        d = load(); d["config"]["welcome_photo_id"] = file_id; save(d)
+        clear_state(uid)
+        bot.send_message(msg.chat.id,
+            f"✅ <b>Welcome photo save ho gaya!</b>\n"
+            f"File ID: <code>{file_id}</code>\n\n"
+            "Ab /start karne par sabko yeh photo dikhegi.",
+            parse_mode="HTML")
+        try:
+            bot.send_photo(msg.chat.id, file_id, caption="Preview ↑")
+        except Exception:
+            pass
+
+# ── /setwelcomecaption ────────────────────────────────────────────────────────
+@bot.message_handler(commands=["setwelcomecaption"])
+def cmd_setwelcomecaption(msg):
+    if not is_main_master(msg.from_user.id):
+        bot.reply_to(msg, "❌ Sirf Main Master kar sakta hai!"); return
+    parts = msg.text.split(None, 1)
+    if len(parts) < 2:
+        bot.send_message(msg.chat.id,
+            "📝 <b>Welcome Caption Set karo</b>\n\n"
+            "Usage: <code>/setwelcomecaption Aapka text yahan...</code>\n\n"
+            "Tip: <code>{name}</code> likhoge toh wahan user ka naam ayega.\n\n"
+            "Default caption wapas lane ke liye: <code>/setwelcomecaption remove</code>",
+            parse_mode="HTML"); return
+    val = parts[1].strip()
+    if val.lower() == "remove":
+        d = load(); d["config"]["welcome_caption"] = ""; save(d)
+        bot.send_message(msg.chat.id, "🗑️ Custom caption remove — default use hoga.")
+    else:
+        d = load(); d["config"]["welcome_caption"] = val; save(d)
+        bot.send_message(msg.chat.id,
+            f"✅ <b>Welcome caption save ho gaya!</b>\n\nPreview:\n{val.replace('{name}', 'User')}",
+            parse_mode="HTML")
 
 # ── /setpromo ─────────────────────────────────────────────────────────────────
 @bot.message_handler(commands=["setpromo"])
