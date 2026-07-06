@@ -3352,13 +3352,68 @@ def cmd_start(msg):
         reply_markup=main_inline_kb(uid), parse_mode="HTML")
 
 
+def _force_join_chat_id(g):
+    """Group string (@username ya t.me link) ko get_chat_member ke liye chat_id mein convert karo."""
+    g = g.strip()
+    if g.startswith("https://t.me/"):
+        uname = g.replace("https://t.me/", "").strip("/")
+        return f"@{uname}"
+    if not g.startswith("@") and not g.lstrip("-").isdigit():
+        return f"@{g}"
+    return g
+
+def get_unjoined_force_groups(uid, groups):
+    """
+    Har group mein bot.get_chat_member() se REAL membership check karo.
+    Returns: list of groups jo user ne join nahi kiye (ya verify nahi ho paaya).
+    """
+    unjoined = []
+    for g in groups:
+        chat_id = _force_join_chat_id(g)
+        try:
+            member = bot.get_chat_member(chat_id, uid)
+            if member.status in ("left", "kicked"):
+                unjoined.append(g)
+        except Exception:
+            # Bot group check nahi kar paaya (member/admin nahi hai, ya invalid group) —
+            # safe default: joined nahi maano, jab tak verify na ho
+            unjoined.append(g)
+    return unjoined
+
 @bot.callback_query_handler(func=lambda c: c.data == "after_join_start")
 def cb_after_join_start(call):
-    bot.answer_callback_query(call.id, "✅ Shukriya! Welcome aboard!")
     uid  = call.from_user.id
     name = call.from_user.first_name or "User"
 
-    d          = load()
+    d       = load()
+    groups  = d["config"].get("force_join_groups", [])
+    pending = get_unjoined_force_groups(uid, groups) if groups else []
+
+    if pending:
+        bot.answer_callback_query(call.id, "❌ Abhi bhi kuch groups join nahi kiye!", show_alert=True)
+        join_kb = InlineKeyboardMarkup(row_width=1)
+        for g in groups:
+            if g.startswith("@"):
+                url = f"https://t.me/{g.lstrip('@')}"
+            elif g.startswith("https://t.me/"):
+                url = g
+            else:
+                continue
+            mark = "❌" if g in pending else "✅"
+            join_kb.add(InlineKeyboardButton(f"{mark} Join Group: {g}", url=url))
+        join_kb.add(InlineKeyboardButton(
+            "✅ Maine join kar liya — Recheck karo!", callback_data="after_join_start"))
+        bot.send_message(
+            call.message.chat.id,
+            "🔗 <b>Kuch groups abhi bhi join nahi kiye!</b>\n\n"
+            + "\n".join(f"❌ {g}" for g in pending)
+            + "\n\nPehle inhe join karo, phir ✅ button dabao.",
+            reply_markup=join_kb, parse_mode="HTML"
+        )
+        return
+
+    bot.answer_callback_query(call.id, "✅ Shukriya! Welcome aboard!")
+
     cfg        = d["config"]
     photo_id   = cfg.get("welcome_photo_id", "")
     custom_cap = cfg.get("welcome_caption", "")
