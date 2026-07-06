@@ -3844,6 +3844,16 @@ def cmd_accounts(msg):
         mk.add(InlineKeyboardButton("🗑 Delete Account", callback_data="del_account_list"))
     bot.send_message(msg.chat.id, "\n".join(lines), reply_markup=mk)
 
+GROUP_ADD_LIMIT_WARNING = (
+    "⚠️ <b>Warning / चेतावनी</b>\n\n"
+    "🇮🇳 Agar ye NAYA account hai, toh ek din mein sirf <b>5 members</b> hi add karo!\n"
+    "Zyada add karne se Telegram aapka account <b>freeze/ban</b> kar sakta hai — "
+    "iski poori zimmedari <b>aapki khud ki</b> hogi.\n\n"
+    "🇬🇧 If this is a NEW account, add only <b>5 members per day</b>!\n"
+    "Adding more can get your Telegram account <b>frozen/banned</b> — "
+    "you will be <b>solely responsible</b> for that."
+)
+
 @bot.message_handler(commands=["add"])
 def cmd_add(msg):
     uid    = msg.from_user.id
@@ -3851,6 +3861,7 @@ def cmd_add(msg):
     if not access:
         bot.reply_to(msg, "❌ Access denied!"); return
     set_state(uid, "add_phone")
+    bot.send_message(msg.chat.id, GROUP_ADD_LIMIT_WARNING, parse_mode="HTML")
     bot.send_message(
         msg.chat.id,
         "📱 <b>Account Add karo</b>\n\n"
@@ -3864,6 +3875,7 @@ def cmd_add(msg):
 def cb_add_account(call):
     bot.answer_callback_query(call.id)
     set_state(call.from_user.id, "add_phone")
+    bot.send_message(call.message.chat.id, GROUP_ADD_LIMIT_WARNING, parse_mode="HTML")
     bot.send_message(
         call.message.chat.id,
         "📱 <b>Account Add karo</b>\n\n"
@@ -4648,6 +4660,7 @@ def cmd_groupadd(msg):
             callback_data=f"ga_job_{j['id']}"
         ))
     mk.add(InlineKeyboardButton("❌ Cancel", callback_data="cancel_cb"))
+    bot.send_message(msg.chat.id, GROUP_ADD_LIMIT_WARNING, parse_mode="HTML")
     bot.send_message(
         msg.chat.id,
         "👥 <b>Group Add Campaign</b>\n\n"
@@ -4706,6 +4719,7 @@ def cb_ga_per_acc(call):
         InlineKeyboardButton("✅ Haan, Shuru Karo!", callback_data="ga_confirm"),
         InlineKeyboardButton("❌ Cancel",            callback_data="cancel_cb"),
     )
+    bot.send_message(call.message.chat.id, GROUP_ADD_LIMIT_WARNING, parse_mode="HTML")
     bot.send_message(
         call.message.chat.id,
         f"📋 <b>Group Add Campaign — Summary</b>\n\n"
