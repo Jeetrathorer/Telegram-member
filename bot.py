@@ -5430,6 +5430,15 @@ def cmd_setmainmaster(msg):
 #  FORCE JOIN COMMANDS (Main Master only)
 # ═══════════════════════════════════════════════════════
 
+def _normalize_force_join_group(g):
+    g = g.strip()
+    if g.startswith("https://t.me/"):
+        sl = g.split("https://t.me/")[1].split("/")[0]
+        return ("https://t.me/" + sl) if sl.startswith("+") else ("@" + sl)
+    if not g.startswith("@") and not g.startswith("-") and not g.lstrip("-").isdigit():
+        return "@" + g
+    return g
+
 @bot.message_handler(commands=["setforcejoin"])
 def cmd_setforcejoin(msg):
     if not is_main_master(msg.from_user.id):
@@ -5441,26 +5450,55 @@ def cmd_setforcejoin(msg):
         bot.reply_to(msg,
             "📌 <b>Force Join Groups</b>\n\n"
             f"Current: {', '.join(curr) if curr else 'Koi nahi'}\n\n"
-            "Set karne ke liye:\n"
-            "<code>/setforcejoin @group1, @group2, @group3</code>\n\n"
+            "Naya group ADD karne ke liye (purane groups delete nahi honge):\n"
+            "<code>/setforcejoin @group1, @group2</code>\n\n"
+            "Hatane ke liye: <code>/removeforcejoin @group1</code>\n"
+            "Sab hatane ke liye: <code>/clearforcejoin</code>\n\n"
             "Bot start hote hi saare active accounts ye groups join karenge.")
         return
-    raw_groups = [g.strip() for g in parts[1].split(",") if g.strip()]
-    groups = []
-    for g in raw_groups[:3]:  # Max 3
-        if g.startswith("https://t.me/"):
-            sl = g.split("https://t.me/")[1].split("/")[0]
-            g  = ("https://t.me/" + sl) if sl.startswith("+") else ("@" + sl)
-        elif not g.startswith("@") and not g.startswith("-") and not g.lstrip("-").isdigit():
-            g = "@" + g
-        groups.append(g)
-    d = load()
+    raw_groups = [_normalize_force_join_group(g) for g in parts[1].split(",") if g.strip()]
+    d      = load()
+    groups = list(d["config"].get("force_join_groups", []))
+    for g in raw_groups:
+        if g not in groups:
+            groups.append(g)
+    groups = groups[:3]  # Max 3
     d["config"]["force_join_groups"] = groups
     save(d)
     bot.reply_to(msg,
-        f"✅ <b>Force Join Groups set ho gaye!</b>\n\n"
+        f"✅ <b>Force Join Groups add ho gaye!</b>\n\n"
         + "\n".join(f"• <code>{g}</code>" for g in groups)
         + "\n\n/forcejoin se abhi join karwao ya bot restart pe auto-join hoga.")
+
+@bot.message_handler(commands=["removeforcejoin"])
+def cmd_removeforcejoin(msg):
+    if not is_main_master(msg.from_user.id):
+        bot.reply_to(msg, "❌ Sirf Main Master ye kar sakta hai!"); return
+    parts = msg.text.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        bot.reply_to(msg, "Usage: <code>/removeforcejoin @groupname</code>", parse_mode="HTML"); return
+    targets = [_normalize_force_join_group(g) for g in parts[1].split(",") if g.strip()]
+    d      = load()
+    groups = d["config"].get("force_join_groups", [])
+    remaining = [g for g in groups if g not in targets]
+    removed   = [g for g in groups if g in targets]
+    d["config"]["force_join_groups"] = remaining
+    save(d)
+    if removed:
+        bot.reply_to(msg,
+            "✅ <b>Remove ho gaye:</b>\n" + "\n".join(f"• <code>{g}</code>" for g in removed)
+            + (f"\n\n<b>Baaki bache:</b>\n" + "\n".join(f"• <code>{g}</code>" for g in remaining) if remaining else "\n\nAb koi force join group nahi bacha."))
+    else:
+        bot.reply_to(msg, "❌ Ye group list mein mila hi nahi.")
+
+@bot.message_handler(commands=["clearforcejoin"])
+def cmd_clearforcejoin(msg):
+    if not is_main_master(msg.from_user.id):
+        bot.reply_to(msg, "❌ Sirf Main Master ye kar sakta hai!"); return
+    d = load()
+    d["config"]["force_join_groups"] = []
+    save(d)
+    bot.reply_to(msg, "✅ Saare force join groups clear kar diye gaye.")
 
 @bot.message_handler(commands=["forcejoin"])
 def cmd_forcejoin(msg):
@@ -5507,18 +5545,53 @@ def cmd_setmusicbots(msg):
             "🎵 <b>Music Bot Usernames</b>\n\n"
             f"Current: {', '.join(curr) if curr else 'Koi nahi'}\n\n"
             "Scrape se pehle ye bots target group mein add kiye jayenge.\n\n"
-            "Set karne ke liye:\n"
-            "<code>/setmusicbots @musicbot1, @musicbot2</code>")
+            "Naya bot ADD karne ke liye (purane delete nahi honge):\n"
+            "<code>/setmusicbots @musicbot1, @musicbot2</code>\n\n"
+            "Hatane ke liye: <code>/removemusicbot @musicbot1</code>\n"
+            "Sab hatane ke liye: <code>/clearmusicbots</code>")
         return
-    bots = [b.strip() for b in parts[1].split(",") if b.strip()]
-    bots = [("@" + b.lstrip("@")) for b in bots]
+    new_bots = [("@" + b.strip().lstrip("@")) for b in parts[1].split(",") if b.strip()]
     d    = load()
+    bots = list(d["config"].get("music_bot_usernames", []))
+    for b in new_bots:
+        if b not in bots:
+            bots.append(b)
     d["config"]["music_bot_usernames"] = bots
     save(d)
     bot.reply_to(msg,
-        f"✅ <b>Music Bots set ho gaye!</b>\n\n"
+        f"✅ <b>Music Bots add ho gaye!</b>\n\n"
         + "\n".join(f"• <code>{b}</code>" for b in bots)
         + "\n\nAb /scrape karte waqt ye bots target group mein automatically add honge.")
+
+@bot.message_handler(commands=["removemusicbot"])
+def cmd_removemusicbot(msg):
+    if not is_main_master(msg.from_user.id):
+        bot.reply_to(msg, "❌ Sirf Main Master ye kar sakta hai!"); return
+    parts = msg.text.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        bot.reply_to(msg, "Usage: <code>/removemusicbot @musicbot1</code>", parse_mode="HTML"); return
+    targets = [("@" + b.strip().lstrip("@")) for b in parts[1].split(",") if b.strip()]
+    d    = load()
+    bots = d["config"].get("music_bot_usernames", [])
+    remaining = [b for b in bots if b not in targets]
+    removed   = [b for b in bots if b in targets]
+    d["config"]["music_bot_usernames"] = remaining
+    save(d)
+    if removed:
+        bot.reply_to(msg,
+            "✅ <b>Remove ho gaye:</b>\n" + "\n".join(f"• <code>{b}</code>" for b in removed)
+            + (f"\n\n<b>Baaki bache:</b>\n" + "\n".join(f"• <code>{b}</code>" for b in remaining) if remaining else "\n\nAb koi music bot nahi bacha."))
+    else:
+        bot.reply_to(msg, "❌ Ye bot list mein mila hi nahi.")
+
+@bot.message_handler(commands=["clearmusicbots"])
+def cmd_clearmusicbots(msg):
+    if not is_main_master(msg.from_user.id):
+        bot.reply_to(msg, "❌ Sirf Main Master ye kar sakta hai!"); return
+    d = load()
+    d["config"]["music_bot_usernames"] = []
+    save(d)
+    bot.reply_to(msg, "✅ Saare music bots clear kar diye gaye.")
 
 # ═══════════════════════════════════════════════════════
 #  BLACKLIST GROUP COMMANDS (Main Master only)
