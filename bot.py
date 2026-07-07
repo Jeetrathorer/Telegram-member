@@ -435,7 +435,10 @@ def sync_account_status(data):
     changed = False
     for a in data["accounts"]:
         safe = a["phone"].replace("+", "").replace(" ", "")
-        has_session = os.path.exists(os.path.join(SESSION_DIR, safe + ".session"))
+        has_file = os.path.exists(os.path.join(SESSION_DIR, safe + ".session"))
+        has_string = bool(a.get("session_string") and a["session_string"].strip())
+        # Heroku pe session files gayab ho sakti hain, lekin session_string MongoDB mein persist hoti hai
+        has_session = has_file or has_string
         if not has_session:
             if a.get("verified") or a.get("active"):
                 a["verified"] = False
