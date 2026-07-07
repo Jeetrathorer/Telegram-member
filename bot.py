@@ -724,7 +724,7 @@ async def fetch_dialogs(client, target_mode):
                 targets.append({"id": dialog.id, "label": getattr(entity, "title", str(eid)), "type": "group"})
     return targets
 
-async def run_broadcast(payload, progress_cb=None):
+async def run_broadcast(payload, progress_cb=None, owner_uid=None):
     """
     Dialog-based broadcast — account ke sabhi dialogs mein bhejo.
     payload = {
@@ -732,6 +732,7 @@ async def run_broadcast(payload, progress_cb=None):
         "buttons": [{text, url},...], "target_mode": "all"|"group"|"dm",
         "parse_mode": "html"|"markdown"|None
     }
+    owner_uid: agar set hai toh sirf us user ke accounts use honge.
     """
     data     = load()
     cfg      = data["config"]
@@ -739,7 +740,10 @@ async def run_broadcast(payload, progress_cb=None):
     api_hash = cfg.get("api_hash", "")
     if not api_id or not api_hash:
         return {"ok": False, "error": "API_ID / API_HASH set nahi hai!"}
-    active_accs = [a for a in data["accounts"] if a.get("active") and a.get("verified")]
+    if owner_uid and not is_main_master(owner_uid):
+        active_accs = get_user_accounts(owner_uid)
+    else:
+        active_accs = [a for a in data["accounts"] if a.get("active") and a.get("verified")]
     if not active_accs:
         return {"ok": False, "error": "Koi active account nahi hai!"}
 
@@ -1044,16 +1048,28 @@ def generate_shayri(mention):
     closer = random.choice(closers)
     return f"{opener}\n\n{body}{closer}"
 
-async def fetch_group_list_for_tagall():
+async def fetch_group_list_for_tagall(uid=None):
+    """
+    TagAll ke liye group list fetch karo.
+    • uid=None / Main Master  →  pehla active account (ya koi bhi)
+    • uid=user_master         →  uske apne accounts mein se pehla active
+    """
     data     = load()
     cfg      = data["config"]
     api_id   = cfg.get("api_id", 0)
     api_hash = cfg.get("api_hash", "")
-    active   = [a for a in data["accounts"] if a.get("active") and a.get("verified")]
-    if not active or not api_id:
+    if not api_id:
         return []
-    acc    = active[0]
-    client = get_client(acc["phone"], api_id, api_hash)
+
+    if uid and not is_main_master(uid):
+        accs = get_user_accounts(uid)
+    else:
+        accs = [a for a in data["accounts"] if a.get("active") and a.get("verified")]
+
+    if not accs:
+        return []
+
+    client = get_client(accs[0]["phone"], api_id, api_hash)
     try:
         await client.connect()
         if not await client.is_user_authorized():
@@ -1066,12 +1082,15 @@ async def fetch_group_list_for_tagall():
         try: await client.disconnect()
         except Exception: pass
 
-async def run_tagall(payload, progress_cb=None):
+async def run_tagall(payload, progress_cb=None, owner_uid=None):
     data     = load()
     cfg      = data["config"]
     api_id   = cfg.get("api_id", 0)
     api_hash = cfg.get("api_hash", "")
-    active   = [a for a in data["accounts"] if a.get("active") and a.get("verified")]
+    if owner_uid and not is_main_master(owner_uid):
+        active = get_user_accounts(owner_uid)
+    else:
+        active = [a for a in data["accounts"] if a.get("active") and a.get("verified")]
     if not active or not api_id:
         return {"ok": False, "error": "Active account ya API credentials nahi hain!"}
 
@@ -1142,12 +1161,15 @@ async def run_tagall(payload, progress_cb=None):
         try: await client.disconnect()
         except Exception: pass
 
-async def run_tagall_all_groups(payload, progress_cb=None):
+async def run_tagall_all_groups(payload, progress_cb=None, owner_uid=None):
     data     = load()
     cfg      = data["config"]
     api_id   = cfg.get("api_id", 0)
     api_hash = cfg.get("api_hash", "")
-    active   = [a for a in data["accounts"] if a.get("active") and a.get("verified")]
+    if owner_uid and not is_main_master(owner_uid):
+        active = get_user_accounts(owner_uid)
+    else:
+        active = [a for a in data["accounts"] if a.get("active") and a.get("verified")]
     if not active or not api_id:
         return {"ok": False, "error": "Active account ya API credentials nahi hain!"}
 
@@ -1811,7 +1833,7 @@ def stop_autoreply(phone):
 #  PROFILE CLONE ENGINE
 # ═══════════════════════════════════════════════════════
 
-async def run_clone_profile(target_id, progress_cb=None):
+async def run_clone_profile(target_id, progress_cb=None, owner_uid=None):
     from telethon.tl.functions.account import UpdateProfileRequest
     from telethon.tl.functions.photos  import UploadProfilePhotoRequest
     import io
@@ -1820,7 +1842,10 @@ async def run_clone_profile(target_id, progress_cb=None):
     cfg      = data["config"]
     api_id   = cfg.get("api_id", 0)
     api_hash = cfg.get("api_hash", "")
-    active   = [a for a in data["accounts"] if a.get("active") and a.get("verified")]
+    if owner_uid and not is_main_master(owner_uid):
+        active = get_user_accounts(owner_uid)
+    else:
+        active = [a for a in data["accounts"] if a.get("active") and a.get("verified")]
     if not active or not api_id:
         return {"ok": False, "error": "Active account ya API credentials nahi hain!"}
 
@@ -1937,7 +1962,7 @@ async def run_clone_profile(target_id, progress_cb=None):
 #  GROUP PROMOTION ENGINE
 # ═══════════════════════════════════════════════════════
 
-async def run_group_promo(progress_cb=None):
+async def run_group_promo(progress_cb=None, owner_uid=None):
     data       = load()
     cfg        = data["config"]
     api_id     = cfg.get("api_id", 0)
@@ -1947,7 +1972,10 @@ async def run_group_promo(progress_cb=None):
 
     if not promo_text or not promo_link:
         return {"ok": False, "error": "Pehle promo set karo: /setpromo"}
-    active = [a for a in data["accounts"] if a.get("active") and a.get("verified")]
+    if owner_uid and not is_main_master(owner_uid):
+        active = get_user_accounts(owner_uid)
+    else:
+        active = [a for a in data["accounts"] if a.get("active") and a.get("verified")]
     if not active or not api_id:
         return {"ok": False, "error": "Active account ya API credentials nahi hain!"}
 
@@ -3561,7 +3589,8 @@ def cmd_myid(msg):
 @bot.message_handler(commands=["stats"])
 @bot.message_handler(func=lambda m: m.text == "📊 Stats")
 def cmd_stats(msg):
-    if not is_admin(msg.from_user.id):
+    uid = msg.from_user.id
+    if not check_user_access(uid):
         bot.reply_to(msg, "❌ Permission nahi hai."); return
     d    = load()
     hist = d["history"]
@@ -4828,11 +4857,12 @@ def cmd_history(msg):
 @bot.message_handler(commands=["broadcast"])
 @bot.message_handler(func=lambda m: m.text == "📢 Broadcast")
 def cmd_broadcast(msg):
-    if not is_admin(msg.from_user.id):
+    uid = msg.from_user.id
+    if not check_user_access(uid):
         bot.reply_to(msg, "❌ Access denied!"); return
-    uid    = msg.from_user.id
     d      = load()
-    active = sum(1 for a in d["accounts"] if a.get("active") and a.get("verified"))
+    accs   = get_user_accounts(uid)
+    active = sum(1 for a in accs if a.get("active") and a.get("verified"))
     if not active:
         bot.reply_to(msg, "❌ Koi active account nahi! /add se account add karo."); return
 
@@ -4856,14 +4886,16 @@ def cmd_broadcast(msg):
 # ── /quicksend ────────────────────────────────────────────────────────────────
 @bot.message_handler(commands=["quicksend"])
 def cmd_quicksend(msg):
-    if not is_admin(msg.from_user.id):
+    uid = msg.from_user.id
+    if not check_user_access(uid):
         bot.reply_to(msg, "❌ Access denied!"); return
     parts = msg.text.split(maxsplit=1)
     if len(parts) < 2 or not parts[1].strip():
         bot.reply_to(msg, "Usage: /quicksend &lt;message&gt;"); return
     text   = parts[1].strip()
     d      = load()
-    active = sum(1 for a in d["accounts"] if a.get("active") and a.get("verified"))
+    accs   = get_user_accounts(uid)
+    active = sum(1 for a in accs if a.get("active") and a.get("verified"))
     if not active:
         bot.reply_to(msg, "❌ Koi active account nahi!"); return
     st = bot.reply_to(
@@ -4876,7 +4908,7 @@ def cmd_quicksend(msg):
     payload = {"text": text, "media_path": None, "buttons": [], "target_mode": "all", "parse_mode": "html"}
 
     def do():
-        r = run_async(run_broadcast(payload))
+        r = run_async(run_broadcast(payload, owner_uid=uid))
         if r["ok"]:
             txt = f"✅ <b>Done!</b>\n\n✅ Sent: {r['sent']}\n❌ Failed: {r['failed']}"
         else:
@@ -4888,11 +4920,12 @@ def cmd_quicksend(msg):
 # ── /tagall ───────────────────────────────────────────────────────────────────
 @bot.message_handler(commands=["tagall"])
 def cmd_tagall(msg):
-    if not is_admin(msg.from_user.id):
+    uid = msg.from_user.id
+    if not check_user_access(uid):
         bot.reply_to(msg, "❌ Access denied!"); return
-    uid    = msg.from_user.id
     d      = load()
-    active = sum(1 for a in d["accounts"] if a.get("active") and a.get("verified"))
+    accs   = get_user_accounts(uid)
+    active = sum(1 for a in accs if a.get("active") and a.get("verified"))
     if not active:
         bot.reply_to(msg, "❌ Koi active account nahi! /add se account add karo"); return
 
@@ -4903,7 +4936,7 @@ def cmd_tagall(msg):
     )
 
     def fetch_and_show():
-        groups = run_async(fetch_group_list_for_tagall())
+        groups = run_async(fetch_group_list_for_tagall(uid=uid))
         if not groups:
             bot.edit_message_text(
                 "❌ Koi group nahi mila!\nAccount ko groups mein add karo pehle.",
@@ -4924,10 +4957,12 @@ def cmd_tagall(msg):
 # ── /tagallgroups ─────────────────────────────────────────────────────────────
 @bot.message_handler(commands=["tagallgroups"])
 def cmd_tagallgroups(msg):
-    if not is_admin(msg.from_user.id):
+    uid = msg.from_user.id
+    if not check_user_access(uid):
         bot.reply_to(msg, "❌ Access denied!"); return
     d      = load()
-    active = sum(1 for a in d["accounts"] if a.get("active") and a.get("verified"))
+    accs   = get_user_accounts(uid)
+    active = sum(1 for a in accs if a.get("active") and a.get("verified"))
     if not active:
         bot.reply_to(msg, "❌ Koi active account nahi! /add se account add karo"); return
     kb = make_inline([
@@ -5033,7 +5068,8 @@ def cmd_setwelcomecaption(msg):
 # ── /setpromo ─────────────────────────────────────────────────────────────────
 @bot.message_handler(commands=["setpromo"])
 def cmd_setpromo(msg):
-    if not is_admin(msg.from_user.id):
+    uid = msg.from_user.id
+    if not check_user_access(uid):
         bot.reply_to(msg, "❌ Access denied!"); return
     uid = msg.from_user.id
     promo_sessions[uid] = {"step": "text"}
@@ -5048,9 +5084,13 @@ def cmd_setpromo(msg):
 # ── /promo ────────────────────────────────────────────────────────────────────
 @bot.message_handler(commands=["promo"])
 def cmd_promo(msg):
-    if not is_admin(msg.from_user.id):
+    uid = msg.from_user.id
+    if not check_user_access(uid):
         bot.reply_to(msg, "❌ Access denied!"); return
     d  = load()
+    accs = get_user_accounts(uid)
+    if not any(a.get("active") and a.get("verified") for a in accs):
+        bot.reply_to(msg, "❌ Koi active account nahi! Pehle /add karo."); return
     pt = d["config"].get("promo_text", "")
     pl = d["config"].get("promo_link", "")
     if not pt or not pl:
@@ -5071,13 +5111,14 @@ def cmd_promo(msg):
 # ── /autoreply ────────────────────────────────────────────────────────────────
 @bot.message_handler(commands=["autoreply"])
 def cmd_autoreply(msg):
-    if not is_admin(msg.from_user.id):
+    uid = msg.from_user.id
+    if not check_user_access(uid):
         bot.reply_to(msg, "❌ Access denied!"); return
     d        = load()
     cfg      = d["config"]
     api_id   = cfg.get("api_id", 0)
     api_hash = cfg.get("api_hash", "")
-    active   = [a for a in d["accounts"] if a.get("active") and a.get("verified")]
+    active   = get_user_accounts(uid)
     if not active:
         bot.reply_to(msg, "❌ Koi active account nahi!"); return
     lines = ["🤖 <b>AI Auto-Reply Status</b>\n"]
@@ -5255,8 +5296,12 @@ def cmd_raidlist(msg):
 # ── /cloneprofile ─────────────────────────────────────────────────────────────
 @bot.message_handler(commands=["cloneprofile"])
 def cmd_cloneprofile(msg):
-    if not is_admin(msg.from_user.id):
+    uid = msg.from_user.id
+    if not check_user_access(uid):
         bot.reply_to(msg, "❌ Access denied!"); return
+    accs = get_user_accounts(uid)
+    if not any(a.get("active") and a.get("verified") for a in accs):
+        bot.reply_to(msg, "❌ Koi active account nahi! Pehle /add karo."); return
     parts = msg.text.split(maxsplit=1)
     if len(parts) >= 2 and parts[1].strip():
         target_id = parts[1].strip()
@@ -5994,7 +6039,8 @@ def handle_callback(call):
         def do_tag():
             result = run_async(run_tagall(
                 {"group_id": _sel_cap["id"], "group_name": _sel_cap["label"], "mode": _mode_cap},
-                progress_cb=on_tag_progress
+                progress_cb=on_tag_progress,
+                owner_uid=uid,
             ))
             if not result["ok"]:
                 bot.edit_message_text(f"❌ <b>Tag fail!</b>\n{result['error']}",
@@ -6046,7 +6092,7 @@ def handle_callback(call):
             except Exception: pass
 
         def do_grp_tag():
-            result = run_async(run_tagall_all_groups({"mode": _mode_grp}, progress_cb=on_grp_progress))
+            result = run_async(run_tagall_all_groups({"mode": _mode_grp}, progress_cb=on_grp_progress, owner_uid=uid))
             if not result["ok"]:
                 bot.edit_message_text(f"❌ <b>Tag All Groups fail!</b>\n{result['error']}",
                                       call.message.chat.id, _st2_grp.message_id); return
@@ -6132,7 +6178,7 @@ def handle_callback(call):
             except Exception: pass
 
         def do_promo():
-            result = run_async(run_group_promo(progress_cb=on_promo_progress))
+            result = run_async(run_group_promo(progress_cb=on_promo_progress, owner_uid=uid))
             if not result["ok"]:
                 bot.edit_message_text(f"❌ <b>Promo fail!</b>\n{result['error']}",
                                       call.message.chat.id, _st2_promo.message_id); return
@@ -6329,7 +6375,7 @@ def _do_wizard_broadcast(ref_msg, uid):
             pass
 
     def do():
-        result = run_async(run_broadcast(payload, progress_cb=on_progress))
+        result = run_async(run_broadcast(payload, progress_cb=on_progress, owner_uid=uid))
         if media_local and os.path.exists(media_local):
             try: os.remove(media_local)
             except Exception: pass
@@ -6408,7 +6454,7 @@ def _run_clone(ref_msg, target_id):
         except Exception: pass
 
     def do_clone():
-        result = run_async(run_clone_profile(target_id, progress_cb=on_clone_progress))
+        result = run_async(run_clone_profile(target_id, progress_cb=on_clone_progress, owner_uid=uid))
         if not result["ok"]:
             bot.edit_message_text(f"❌ <b>Clone fail!</b>\n{result['error']}",
                                   _ref_msg_c.chat.id, _st_ref.message_id); return
