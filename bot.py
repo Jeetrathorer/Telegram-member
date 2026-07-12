@@ -353,19 +353,20 @@ def load():
     cfg.setdefault("welcome_photo_id", "")
     cfg.setdefault("welcome_caption", "")
     d.setdefault("account_owners", {})
-    # ── MongoDB se accounts restore karo (Heroku restart pe file wipe hoti hai) ──
-    if not d.get("accounts"):
-        mongo_accs = _mongo_load_accounts()
-        if mongo_accs:
-            existing = {a["phone"] for a in d["accounts"]}
-            owners   = d.setdefault("account_owners", {})
-            for acc in mongo_accs:
-                if acc.get("phone") and acc["phone"] not in existing:
-                    d["accounts"].append(acc)
-                    existing.add(acc["phone"])
-                    owner = acc.get("owner_id")
-                    if owner:
-                        owners[acc["phone"]] = str(owner)
+    # ── MongoDB se accounts HAMESHA merge karo (restart-safe permanent backup) ──
+    # FIX: Pehle sirf empty list pe MongoDB se load hota tha.
+    # Ab hamesha naye accounts merge hote hain — restart ke baad bhi koi account nahi jaayega.
+    mongo_accs = _mongo_load_accounts()
+    if mongo_accs:
+        existing = {a["phone"] for a in d.get("accounts", [])}
+        owners   = d.setdefault("account_owners", {})
+        for acc in mongo_accs:
+            if acc.get("phone") and acc["phone"] not in existing:
+                d["accounts"].append(acc)
+                existing.add(acc["phone"])
+                owner = acc.get("owner_id")
+                if owner:
+                    owners[acc["phone"]] = str(owner)
     # ── Local .mongo_uri fallback file se URI load karo ────────────────────────
     if not os.environ.get("MONGODB_URI"):
         try:
@@ -397,9 +398,10 @@ def load():
     return d
 
 def save(data):
-    os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
-    with open(DATA_FILE, "w") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    with _data_lock:
+        os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
+        with open(DATA_FILE, "w") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
     # MongoDB mein bhi save karo — fire-and-forget background thread
     def _bg():
         owners = data.get("account_owners", {})
@@ -420,13 +422,15 @@ def load_cfg():
 
 def save_cfg(cfg):
     """File-2 compat: saves flat cfg dict back into nested structure."""
-    d = load()
-    accs = cfg.pop("accounts", None)
-    if accs is not None:
-        d["accounts"] = accs
-    for k, v in cfg.items():
-        d["config"][k] = v
-    save(d)
+    # FIX: Accounts ko kabhi purane cfg se overwrite mat karo.
+    # Race condition thi: ek thread purana data load karta tha aur naye accounts wipe ho jaate the.
+    # Ab accounts sirf explicitly save(data) se manage honge.
+    cfg.pop("accounts", None)
+    with _data_lock:
+        d = load()
+        for k, v in cfg.items():
+            d["config"][k] = v
+        save(d)
 
 def gen_id():
     return str(int(time.time() * 1000))[-10:]
@@ -555,6 +559,7 @@ def get_db():
 # ═══════════════════════════════════════════════════════
 
 _account_locks = {}
+_data_lock = threading.RLock()  # File-safe load+save ke liye global lock
 
 def _get_account_lock(phone):
     if phone not in _account_locks:
