@@ -455,7 +455,9 @@ def sync_account_status(data):
 # ═══════════════════════════════════════════════════════
 
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA busy_timeout=30000;")
     c = conn.cursor()
     c.executescript("""
         CREATE TABLE IF NOT EXISTS scrape_jobs (
@@ -553,6 +555,29 @@ def get_db():
     conn.execute("PRAGMA busy_timeout=30000;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     return conn
+
+async def connect_with_retry(client, retries=5, base_delay=2):
+    """
+    Telethon apni khud ki sqlite session file kholta hai jiska busy_timeout
+    hamare PRAGMA se set nahi hota (busy_timeout persist nahi hota, sirf
+    journal_mode persist hota hai). Isliye jab do jobs (jaise scrape +
+    broadcast) ek hi account par thodi der overlap ho jaayein, connect()
+    turant "database is locked" de sakta hai. Yahan retry+backoff se woh
+    error user tak dikhne se pehle hi absorb ho jaata hai.
+    """
+    last_err = None
+    for attempt in range(retries):
+        try:
+            await client.connect()
+            return
+        except Exception as e:
+            last_err = e
+            if "database is locked" in str(e).lower() and attempt < retries - 1:
+                await asyncio.sleep(base_delay * (attempt + 1))
+                continue
+            raise
+    if last_err:
+        raise last_err
 
 # ═══════════════════════════════════════════════════════
 #  TELETHON HELPERS
@@ -789,7 +814,7 @@ async def run_broadcast(payload, progress_cb=None, owner_uid=None):
         acc_skipped = 0
 
         try:
-            await client.connect()
+            await connect_with_retry(client)
             if not await client.is_user_authorized():
                 log_lines.append(f"⚠️ [{acc_label}] session expired — re-login karo")
                 acc_stats.append({"label": acc_label, "phone": phone,
@@ -1079,7 +1104,7 @@ async def fetch_group_list_for_tagall(uid=None):
 
     client = get_client(accs[0]["phone"], api_id, api_hash)
     try:
-        await client.connect()
+        await connect_with_retry(client)
         if not await client.is_user_authorized():
             return []
         groups = await fetch_dialogs(client, "group")
@@ -1110,7 +1135,7 @@ async def run_tagall(payload, progress_cb=None, owner_uid=None):
     for acc in active:
         try:
             c = get_client(acc["phone"], api_id, api_hash)
-            await c.connect()
+            await connect_with_retry(c)
             if await c.is_user_authorized():
                 client     = c
                 used_label = acc.get("label") or acc.get("name") or acc["phone"]
@@ -1192,7 +1217,7 @@ async def run_tagall_all_groups(payload, progress_cb=None, owner_uid=None):
     for acc in active:
         try:
             c = get_client(acc["phone"], api_id, api_hash)
-            await c.connect()
+            await connect_with_retry(c)
             if await c.is_user_authorized():
                 client     = c
                 used_label = acc.get("label") or acc.get("name") or acc["phone"]
@@ -1304,7 +1329,7 @@ async def run_auto_leave_inactive(progress_cb=None, owner_uid=None):
         client    = get_client(phone, api_id, api_hash)
         acc_left  = 0
         try:
-            await client.connect()
+            await connect_with_retry(client)
             if not await client.is_user_authorized():
                 log_lines.append(f"⚠️ [{acc_label}] session expired — skip")
                 continue
@@ -1579,7 +1604,7 @@ def _start_replyraid_thread(acc, api_id, api_hash, notify_chat_id=None):
 
         async def _run():
             try:
-                await client.connect()
+                await connect_with_retry(client)
             except Exception as e:
                 _replyraid_active[phone] = False
                 _notify_admin(f"❌ <b>ReplyRaid connect fail:</b> <code>{phone}</code>\n<code>{e}</code>")
@@ -1776,7 +1801,7 @@ def _start_autoreply_thread(acc, api_id, api_hash):
         _autoreply_loops[phone]   = loop
 
         async def _run():
-            await client.connect()
+            await connect_with_retry(client)
             if not await client.is_user_authorized():
                 return
             me = await client.get_me()
@@ -1859,7 +1884,7 @@ async def run_clone_profile(target_id, progress_cb=None, owner_uid=None):
 
     fetcher = get_client(active[0]["phone"], api_id, api_hash)
     try:
-        await fetcher.connect()
+        await connect_with_retry(fetcher)
         if not await fetcher.is_user_authorized():
             return {"ok": False, "error": "Pehla account authorize nahi hai!"}
         if progress_cb:
@@ -1934,7 +1959,7 @@ async def run_clone_profile(target_id, progress_cb=None, owner_uid=None):
             progress_cb(f"Apply ho rahi hai: {acc_label}", idx, len(active))
         client = get_client(phone, api_id, api_hash)
         try:
-            await client.connect()
+            await connect_with_retry(client)
             if not await client.is_user_authorized():
                 log.append(f"⚠️ [{acc_label}] session expired — skip")
                 failed += 1
@@ -1994,7 +2019,7 @@ async def run_group_promo(progress_cb=None, owner_uid=None):
     for acc in active:
         try:
             c = get_client(acc["phone"], api_id, api_hash)
-            await c.connect()
+            await connect_with_retry(c)
             if await c.is_user_authorized():
                 client     = c
                 used_label = acc.get("label") or acc.get("name") or acc["phone"]
@@ -2141,7 +2166,7 @@ async def scrape_group_members(phone, api_id, api_hash, group_target, scrape_id,
             except Exception: pass
 
     try:
-        await client.connect()
+        await connect_with_retry(client)
         if not await client.is_user_authorized():
             return 0, {}, "Account authorized nahi!"
 
@@ -2328,7 +2353,7 @@ async def find_polls_in_chat(phone, api_id, api_hash, group_target):
     client = get_client(phone, api_id, api_hash)
     polls  = []
     try:
-        await client.connect()
+        await connect_with_retry(client)
         if not await client.is_user_authorized():
             return polls, "Account authorized nahi!"
 
@@ -2388,7 +2413,7 @@ async def scrape_poll_voters(phone, api_id, api_hash, group_target, message_id, 
     conn   = get_db()
     total  = 0
     try:
-        await client.connect()
+        await connect_with_retry(client)
         if not await client.is_user_authorized():
             return 0, "Account authorized nahi!"
 
@@ -2623,11 +2648,11 @@ async def do_targeted_broadcast(chat_id_bot, data_bc, bot_instance):
 
         client = get_client(acc["phone"], cfg["api_id"], cfg["api_hash"])
         try:
-            await client.connect()
+            await connect_with_retry(client)
             if not await client.is_user_authorized():
                 bot_instance.send_message(chat_id_bot,
                     f"⚠️ <code>{acc['phone']}</code> session expire — next account!")
-                # Don't advance i — same members try with next account\n                acc_idx += 1\n                continue\n\n            for j, member in enumerate(chunk):\n                uid_m    = int(member["telegram_id"])\n                acc_hash = int(member["access_hash"] or 0)\n                uname    = (member["username"] or "").strip()\n\n                # Resolve target\n                try:\n                    if acc_hash:\n                        target = InputUser(user_id=uid_m, access_hash=acc_hash)\n                    elif uname:\n                        target = await client.get_input_entity(f"@{uname}")\n                    else:\n                        target = uid_m\n                except Exception:\n                    target = uid_m\n\n                try:\n                    await _send_one(client, target, broadcast_id, member["id"], ext)\n                    acc_sent   += 1\n                    total_sent += 1\n                    members_done_in_chunk = j + 1\n                    _del_member(member["id"])\n                    deleted_ids.append(member["id"])\n                    await asyncio.sleep(DELAY_DM)\n\n                except (UserPrivacyRestrictedError, UserIsBlockedError,\n                        InputUserDeactivatedError):\n                    total_skipped += 1\n                    members_done_in_chunk = j + 1\n                    _del_member(member["id"])\n                    deleted_ids.append(member["id"])\n\n                except PeerFloodError:\n                    spammy_phones.add(acc["phone"])\n                    spam_hit = True\n                    bot_instance.send_message(chat_id_bot,\n                        f"🚫 <code>{acc['phone']}</code> SPAM! "\n                        f"Is account se {j} members done. Baki next account se...")\n                    # i will be reset to chunk_start + j so next acc re-handles from here\n                    members_done_in_chunk = j\n                    break\n\n                except FloodWaitError as e:\n                    wait = min(e.seconds, 90)\n                    bot_instance.send_message(chat_id_bot,\n                        f"⏳ FloodWait {e.seconds}s — {wait}s ruk raha hoon...")\n                    await asyncio.sleep(wait)\n                    try:\n                        await _send_one(client, target, broadcast_id, member["id"], ext)\n                        acc_sent   += 1\n                        total_sent += 1\n                        members_done_in_chunk = j + 1\n                        _del_member(member["id"])\n                        deleted_ids.append(member["id"])\n                    except Exception:\n                        total_failed += 1\n                        members_done_in_chunk = j + 1\n\n                except Exception:\n                    total_failed += 1\n                    members_done_in_chunk = j + 1\n\n            # Account summary\n            if acc_sent:\n                bot_instance.send_message(chat_id_bot,\n                    f"✅ <code>{acc['phone']}</code>: <b>{acc_sent}</b> messages sent."\n                    + (f"\n🚫 Spam hit — next account lete hain." if spam_hit else ""))\n\n        except Exception as e:\n            bot_instance.send_message(chat_id_bot,\n                f"❌ <code>{acc['phone']}</code> error: {e}")\n            members_done_in_chunk = len(chunk)\n        finally:\n            try: await client.disconnect()\n            except Exception: pass\n\n        # Advance i only by members actually processed\n        i = chunk_start + members_done_in_chunk\n        # Always move to next account (spammy ones will be skipped at top of loop)\n        acc_idx += 1\n        await asyncio.sleep(2)\n\n    # ── Update DB stats ───────────────────────────────────────────────────────\n    conn = get_db()\n    conn.execute(\n        "UPDATE broadcast_jobs SET status='done',total_sent=?,total_failed=?,total_skipped=? WHERE id=?",\n        (total_sent, total_failed, total_skipped + skipped_inactive, broadcast_id),\n    )\n    conn.commit()\n    conn.close()\n\n    bot_instance.send_message(\n        chat_id_bot,\n        f"🎉 <b>Broadcast Complete!</b>\n\n"\n        f"✅ Sent: <b>{total_sent}</b>\n"\n        f"❌ Failed: <b>{total_failed}</b>\n"\n        f"⏭ Skipped (privacy/inactive): <b>{total_skipped + skipped_inactive}</b>\n"\n        f"🗑️ DB se remove: <b>{len(deleted_ids)}</b>\n"\n        f"━━━━━━━━━━\n"\n        f"📊 Total targeted: <b>{total_targeted}</b>"\n    )\n\n# ═══════════════════════════════════════════════════════\n#  GROUP ADD CAMPAIGN ENGINE  (v2 — no phone number leak)\n#  Flow:\n#    Phase 1 — Direct InviteToChannelRequest (no AddContact)\n#      For each member: try adding to target group directly\n#        ✅ Success     → delete from members DB (no duplicate)\n#        🔒 Privacy     → privacy_queue (phase 2)\n#        ⚠️ Flood/Spam  → switch account\n#\n#    Phase 2 — Send invite link to privacy-blocked members\n#      Try DM with invite link\n#        ✅ Sent  → delete from members DB\n#        🔒 Privacy again → skip\n# ═══════════════════════════════════════════════════════\n\nasync def do_group_add_campaign(chat_id_bot, scrape_id, target_group, invite_link,\n                                 max_per_acc, bot_instance):\n    """\n    Phase 1: InviteToChannelRequest se directly group mein add karo (no AddContact).\n    Phase 2: Privacy-blocked members ko invite link DM karo.\n    • Har member SIRF EK account se process hoga (no duplicate)\n    • Spam account → blacklist, same members next account se try\n    • Processed/failed members DB se TURANT delete hote hain\n    """\n    d    = load()\n    cfg  = d["config"]\n    accs = active_accounts(d)\n\n    if not accs:\n        bot_instance.send_message(chat_id_bot, "❌ Koi active account nahi! Pehle /add karo.")\n        return\n\n    conn    = get_db()\n    members = conn.execute(\n        "SELECT * FROM members WHERE scrape_id=? AND is_deleted=0 ORDER BY id",\n        (scrape_id,)\n    ).fetchall()\n    cur = conn.execute(\n        "INSERT INTO contact_add_jobs (scrape_id,invite_link,broadcast_msg,max_per_acc) VALUES (?,?,?,?)",\n        (scrape_id, invite_link, "", max_per_acc)\n    )\n    job_id = cur.lastrowid\n    conn.commit()\n    conn.close()\n\n    total         = len(members)\n    member_list   = list(members)\n    grand_added   = 0\n    grand_link    = 0\n    grand_failed  = 0\n    grand_deleted = 0\n    privacy_queue = []   # Phase 2 ke liye\n    spammy_phones = set()  # Phase 1 spam accounts — Phase 2 mein bhi skip honge\n\n    # ── helper: delete member from DB immediately ─────────────────────────────\n    def _del(mid):\n        nonlocal grand_deleted\n        try:\n            c = get_db()\n            c.execute("DELETE FROM members WHERE id=?", (mid,))\n            c.commit()\n            c.close()\n            grand_deleted += 1\n        except Exception:\n            pass\n\n    # ── helper: resolve InputUser ─────────────────────────────────────────────\n    async def resolve_user(client, member):\n        uid_m    = int(member["telegram_id"])\n        acc_hash = int(member["access_hash"] or 0)\n        uname    = (member["username"] or "").strip()\n        if acc_hash:\n            return InputUser(user_id=uid_m, access_hash=acc_hash)\n        if uname:\n            try:\n                return await client.get_input_entity(f"@{uname}")\n            except Exception:\n                pass\n        try:\n            return await client.get_input_entity(uid_m)\n        except Exception:\n            return None\n\n    bot_instance.send_message(\n        chat_id_bot,\n        f"🚀 <b>Group Add Campaign Shuru!</b>\n\n"\n        f"🎯 Target: <code>{target_group}</code>\n"\n        f"👥 Total members: <b>{total}</b>\n"\n        f"📱 Accounts: <b>{len(accs)}</b>\n"\n        f"🔢 Per account: <b>{max_per_acc}</b>\n\n"\n        "ℹ️ Har member ek baar, ek hi account se try hoga."\n    )\n\n    # ── Normalize target group ────────────────────────────────────────────────\n    tg = target_group.strip()\n    if tg.startswith("https://t.me/"):\n        slug = tg.split("https://t.me/")[1].split("/")[0]\n        tg   = ("https://t.me/" + slug) if slug.startswith("+") else ("@" + slug)\n    elif not tg.startswith("@") and not tg.startswith("-") and not tg.lstrip("-").isdigit():\n        tg = "@" + tg\n\n    # ═══════════════════════════════════════════════════════════\n    #  PHASE 1: Direct InviteToChannelRequest\n    # ═══════════════════════════════════════════════════════════\n    i       = 0\n    acc_idx = 0\n\n    while i < len(member_list):\n        # Skip spammy accounts\n        while acc_idx < len(accs) and accs[acc_idx]["phone"] in spammy_phones:\n            acc_idx += 1\n\n        if acc_idx >= len(accs):\n            bot_instance.send_message(chat_id_bot,\n                f"⚠️ Saare accounts spam/khatam!\n"\n                f"Baki {len(member_list)-i} members → Phase 2 invite link mein.")\n            privacy_queue.extend(member_list[i:])\n            break\n\n        acc         = accs[acc_idx]\n        chunk       = member_list[i : i + max_per_acc]\n        chunk_start = i\n\n        bot_instance.send_message(chat_id_bot,\n            f"📱 <code>{acc['phone']}</code> — "\n            f"members {i+1}–{min(i+max_per_acc, total)}/{total}")\n\n        acc_added = 0\n        acc_priv  = 0\n        spam_hit  = False\n        done_in_chunk = 0   # kitne process hue spam se pehle\n\n        client = get_client(acc["phone"], cfg["api_id"], cfg["api_hash"])\n        try:\n            await client.connect()\n            if not await client.is_user_authorized():\n                bot_instance.send_message(chat_id_bot,\n                    f"⚠️ <code>{acc['phone']}</code> session expire — next account!")\n                # Don't advance i — same members next account se
+                # Don't advance i — same members try with next account\n                acc_idx += 1\n                continue\n\n            for j, member in enumerate(chunk):\n                uid_m    = int(member["telegram_id"])\n                acc_hash = int(member["access_hash"] or 0)\n                uname    = (member["username"] or "").strip()\n\n                # Resolve target\n                try:\n                    if acc_hash:\n                        target = InputUser(user_id=uid_m, access_hash=acc_hash)\n                    elif uname:\n                        target = await client.get_input_entity(f"@{uname}")\n                    else:\n                        target = uid_m\n                except Exception:\n                    target = uid_m\n\n                try:\n                    await _send_one(client, target, broadcast_id, member["id"], ext)\n                    acc_sent   += 1\n                    total_sent += 1\n                    members_done_in_chunk = j + 1\n                    _del_member(member["id"])\n                    deleted_ids.append(member["id"])\n                    await asyncio.sleep(DELAY_DM)\n\n                except (UserPrivacyRestrictedError, UserIsBlockedError,\n                        InputUserDeactivatedError):\n                    total_skipped += 1\n                    members_done_in_chunk = j + 1\n                    _del_member(member["id"])\n                    deleted_ids.append(member["id"])\n\n                except PeerFloodError:\n                    spammy_phones.add(acc["phone"])\n                    spam_hit = True\n                    bot_instance.send_message(chat_id_bot,\n                        f"🚫 <code>{acc['phone']}</code> SPAM! "\n                        f"Is account se {j} members done. Baki next account se...")\n                    # i will be reset to chunk_start + j so next acc re-handles from here\n                    members_done_in_chunk = j\n                    break\n\n                except FloodWaitError as e:\n                    wait = min(e.seconds, 90)\n                    bot_instance.send_message(chat_id_bot,\n                        f"⏳ FloodWait {e.seconds}s — {wait}s ruk raha hoon...")\n                    await asyncio.sleep(wait)\n                    try:\n                        await _send_one(client, target, broadcast_id, member["id"], ext)\n                        acc_sent   += 1\n                        total_sent += 1\n                        members_done_in_chunk = j + 1\n                        _del_member(member["id"])\n                        deleted_ids.append(member["id"])\n                    except Exception:\n                        total_failed += 1\n                        members_done_in_chunk = j + 1\n\n                except Exception:\n                    total_failed += 1\n                    members_done_in_chunk = j + 1\n\n            # Account summary\n            if acc_sent:\n                bot_instance.send_message(chat_id_bot,\n                    f"✅ <code>{acc['phone']}</code>: <b>{acc_sent}</b> messages sent."\n                    + (f"\n🚫 Spam hit — next account lete hain." if spam_hit else ""))\n\n        except Exception as e:\n            bot_instance.send_message(chat_id_bot,\n                f"❌ <code>{acc['phone']}</code> error: {e}")\n            members_done_in_chunk = len(chunk)\n        finally:\n            try: await client.disconnect()\n            except Exception: pass\n\n        # Advance i only by members actually processed\n        i = chunk_start + members_done_in_chunk\n        # Always move to next account (spammy ones will be skipped at top of loop)\n        acc_idx += 1\n        await asyncio.sleep(2)\n\n    # ── Update DB stats ───────────────────────────────────────────────────────\n    conn = get_db()\n    conn.execute(\n        "UPDATE broadcast_jobs SET status='done',total_sent=?,total_failed=?,total_skipped=? WHERE id=?",\n        (total_sent, total_failed, total_skipped + skipped_inactive, broadcast_id),\n    )\n    conn.commit()\n    conn.close()\n\n    bot_instance.send_message(\n        chat_id_bot,\n        f"🎉 <b>Broadcast Complete!</b>\n\n"\n        f"✅ Sent: <b>{total_sent}</b>\n"\n        f"❌ Failed: <b>{total_failed}</b>\n"\n        f"⏭ Skipped (privacy/inactive): <b>{total_skipped + skipped_inactive}</b>\n"\n        f"🗑️ DB se remove: <b>{len(deleted_ids)}</b>\n"\n        f"━━━━━━━━━━\n"\n        f"📊 Total targeted: <b>{total_targeted}</b>"\n    )\n\n# ═══════════════════════════════════════════════════════\n#  GROUP ADD CAMPAIGN ENGINE  (v2 — no phone number leak)\n#  Flow:\n#    Phase 1 — Direct InviteToChannelRequest (no AddContact)\n#      For each member: try adding to target group directly\n#        ✅ Success     → delete from members DB (no duplicate)\n#        🔒 Privacy     → privacy_queue (phase 2)\n#        ⚠️ Flood/Spam  → switch account\n#\n#    Phase 2 — Send invite link to privacy-blocked members\n#      Try DM with invite link\n#        ✅ Sent  → delete from members DB\n#        🔒 Privacy again → skip\n# ═══════════════════════════════════════════════════════\n\nasync def do_group_add_campaign(chat_id_bot, scrape_id, target_group, invite_link,\n                                 max_per_acc, bot_instance):\n    """\n    Phase 1: InviteToChannelRequest se directly group mein add karo (no AddContact).\n    Phase 2: Privacy-blocked members ko invite link DM karo.\n    • Har member SIRF EK account se process hoga (no duplicate)\n    • Spam account → blacklist, same members next account se try\n    • Processed/failed members DB se TURANT delete hote hain\n    """\n    d    = load()\n    cfg  = d["config"]\n    accs = active_accounts(d)\n\n    if not accs:\n        bot_instance.send_message(chat_id_bot, "❌ Koi active account nahi! Pehle /add karo.")\n        return\n\n    conn    = get_db()\n    members = conn.execute(\n        "SELECT * FROM members WHERE scrape_id=? AND is_deleted=0 ORDER BY id",\n        (scrape_id,)\n    ).fetchall()\n    cur = conn.execute(\n        "INSERT INTO contact_add_jobs (scrape_id,invite_link,broadcast_msg,max_per_acc) VALUES (?,?,?,?)",\n        (scrape_id, invite_link, "", max_per_acc)\n    )\n    job_id = cur.lastrowid\n    conn.commit()\n    conn.close()\n\n    total         = len(members)\n    member_list   = list(members)\n    grand_added   = 0\n    grand_link    = 0\n    grand_failed  = 0\n    grand_deleted = 0\n    privacy_queue = []   # Phase 2 ke liye\n    spammy_phones = set()  # Phase 1 spam accounts — Phase 2 mein bhi skip honge\n\n    # ── helper: delete member from DB immediately ─────────────────────────────\n    def _del(mid):\n        nonlocal grand_deleted\n        try:\n            c = get_db()\n            c.execute("DELETE FROM members WHERE id=?", (mid,))\n            c.commit()\n            c.close()\n            grand_deleted += 1\n        except Exception:\n            pass\n\n    # ── helper: resolve InputUser ─────────────────────────────────────────────\n    async def resolve_user(client, member):\n        uid_m    = int(member["telegram_id"])\n        acc_hash = int(member["access_hash"] or 0)\n        uname    = (member["username"] or "").strip()\n        if acc_hash:\n            return InputUser(user_id=uid_m, access_hash=acc_hash)\n        if uname:\n            try:\n                return await client.get_input_entity(f"@{uname}")\n            except Exception:\n                pass\n        try:\n            return await client.get_input_entity(uid_m)\n        except Exception:\n            return None\n\n    bot_instance.send_message(\n        chat_id_bot,\n        f"🚀 <b>Group Add Campaign Shuru!</b>\n\n"\n        f"🎯 Target: <code>{target_group}</code>\n"\n        f"👥 Total members: <b>{total}</b>\n"\n        f"📱 Accounts: <b>{len(accs)}</b>\n"\n        f"🔢 Per account: <b>{max_per_acc}</b>\n\n"\n        "ℹ️ Har member ek baar, ek hi account se try hoga."\n    )\n\n    # ── Normalize target group ────────────────────────────────────────────────\n    tg = target_group.strip()\n    if tg.startswith("https://t.me/"):\n        slug = tg.split("https://t.me/")[1].split("/")[0]\n        tg   = ("https://t.me/" + slug) if slug.startswith("+") else ("@" + slug)\n    elif not tg.startswith("@") and not tg.startswith("-") and not tg.lstrip("-").isdigit():\n        tg = "@" + tg\n\n    # ═══════════════════════════════════════════════════════════\n    #  PHASE 1: Direct InviteToChannelRequest\n    # ═══════════════════════════════════════════════════════════\n    i       = 0\n    acc_idx = 0\n\n    while i < len(member_list):\n        # Skip spammy accounts\n        while acc_idx < len(accs) and accs[acc_idx]["phone"] in spammy_phones:\n            acc_idx += 1\n\n        if acc_idx >= len(accs):\n            bot_instance.send_message(chat_id_bot,\n                f"⚠️ Saare accounts spam/khatam!\n"\n                f"Baki {len(member_list)-i} members → Phase 2 invite link mein.")\n            privacy_queue.extend(member_list[i:])\n            break\n\n        acc         = accs[acc_idx]\n        chunk       = member_list[i : i + max_per_acc]\n        chunk_start = i\n\n        bot_instance.send_message(chat_id_bot,\n            f"📱 <code>{acc['phone']}</code> — "\n            f"members {i+1}–{min(i+max_per_acc, total)}/{total}")\n\n        acc_added = 0\n        acc_priv  = 0\n        spam_hit  = False\n        done_in_chunk = 0   # kitne process hue spam se pehle\n\n        client = get_client(acc["phone"], cfg["api_id"], cfg["api_hash"])\n        try:\n            await connect_with_retry(client)\n            if not await client.is_user_authorized():\n                bot_instance.send_message(chat_id_bot,\n                    f"⚠️ <code>{acc['phone']}</code> session expire — next account!")\n                # Don't advance i — same members next account se
                 acc_idx += 1
                 continue
 
@@ -2761,7 +2786,7 @@ async def do_targeted_broadcast(chat_id_bot, data_bc, bot_instance):
 
             client = get_client(acc["phone"], cfg["api_id"], cfg["api_hash"])
             try:
-                await client.connect()
+                await connect_with_retry(client)
                 if not await client.is_user_authorized():
                     dm_acc_idx += 1
                     continue      # same j, next account
@@ -3069,7 +3094,7 @@ async def force_join_groups_for_account(phone, api_id, api_hash, groups, progres
     client = get_client(phone, api_id, api_hash)
     results = []
     try:
-        await client.connect()
+        await connect_with_retry(client)
         if not await client.is_user_authorized():
             return results
         for group in groups:
@@ -3153,7 +3178,7 @@ async def add_music_bots_to_group(phone, api_id, api_hash, target_group):
     client = get_client(phone, api_id, api_hash)
     results = []
     try:
-        await client.connect()
+        await connect_with_retry(client)
         if not await client.is_user_authorized():
             return results
         entity = await client.get_entity(target_group)
@@ -4377,7 +4402,7 @@ async def _check_one_account_spambot(phone, api_id, api_hash):
     result = {"phone": phone, "status": "unknown", "message": "", "can_appeal": False, "raw": ""}
     client = get_client(phone, api_id, api_hash)
     try:
-        await client.connect()
+        await connect_with_retry(client)
         if not await client.is_user_authorized():
             result["status"]  = "unauthorized"
             result["message"] = "Session expire ho gaya — dobara /add karo"
@@ -4520,7 +4545,7 @@ def cb_appeal(call):
         result = {"phone": phone, "done": False, "reply": "", "error": ""}
         client = get_client(phone, cfg["api_id"], cfg["api_hash"])
         try:
-            await client.connect()
+            await connect_with_retry(client)
             if not await client.is_user_authorized():
                 result["error"] = "Session expire — /add se dobara login karo"
                 return result
@@ -7164,7 +7189,7 @@ async def add_account_otp():
 
     client = get_client(phone, api_id, api_hash)
     try:
-        await client.connect()
+        await connect_with_retry(client)
         await client.send_code_request(phone)
         ok("OTP bhej diya! Telegram app dekho.")
         otp = input(f"  {W}OTP:{NC} ").strip()

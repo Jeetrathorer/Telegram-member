@@ -3,3 +3,8 @@ pyTelegramBotAPI==4.20.0
 requests==2.31.0
 pymongo==4.7.3
 dnspython==2.6.1
+dnspython==2.6.1
+pymongo==4.7.3
+pyTelegramBotAPI==4.20.0
+requests==2.31.0
+telethon==1.36.0
