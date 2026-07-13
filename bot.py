@@ -3871,10 +3871,11 @@ def cmd_accounts(msg):
     access = check_user_access(uid)
     if not access:
         bot.reply_to(msg, "❌ Access denied!"); return
-    d       = load()
-    changed = sync_account_status(d)
-    if changed:
-        save(d)
+    with _data_lock:
+        d       = load()
+        changed = sync_account_status(d)
+        if changed:
+            save(d)
 
     # Main Master → sab accounts; User Master → sirf apne
     if access == "main_master":
@@ -3965,17 +3966,25 @@ def cb_del_acc_list(call):
 def cb_del_acc(call):
     bot.answer_callback_query(call.id)
     idx = int(call.data.split("_")[-1])
-    d   = load()
-    if idx >= len(d["accounts"]):
-        bot.send_message(call.message.chat.id, "Account nahi mila.")
-        return
-    acc  = d["accounts"].pop(idx)
+    # FIX: load+pop+save atomic — sirf yahi (manual delete) se account hamesha
+    # ke liye hatna chahiye, koi aur concurrent save() isse chhoo na sake.
+    with _data_lock:
+        d = load()
+        if idx >= len(d["accounts"]):
+            bot.send_message(call.message.chat.id, "Account nahi mila.")
+            return
+        acc  = d["accounts"].pop(idx)
+        d.get("account_owners", {}).pop(acc["phone"], None)
+        save(d)
+    # FIX: MongoDB se bhi permanently delete karo — warna next restart/load()
+    # pe Mongo se account wapas merge ho jaata (manually delete karne ke
+    # baawajood account "khud hi" wapas aa jaata).
+    _mongo_delete_account(acc["phone"])
     safe = acc["phone"].replace("+", "").replace(" ", "")
     for ext in [".session", ".session-journal"]:
         f = os.path.join(SESSION_DIR, safe + ext)
         if os.path.exists(f):
             os.remove(f)
-    save(d)
     bot.send_message(call.message.chat.id,
         f"✅ Account delete ho gaya: <code>{acc['phone']}</code>", reply_markup=main_kb())
 
@@ -6741,11 +6750,17 @@ def handle_message(msg):
                          "owner_id": str(uid),
                          "owner_name": adder_name,
                          "added_at": __import__("datetime").datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")}
-                d2["accounts"] = [a for a in d2["accounts"] if a["phone"] != phone]
-                d2["accounts"].append(entry)
-                # Account owner record karo
-                d2.setdefault("account_owners", {})[phone] = str(uid)
-                save(d2)
+                # FIX: load+mutate+save ko ek hi lock ke andar atomic banaya —
+                # pehle kisi doosre concurrent handler (jaise /accounts sync ya
+                # config save) ka stale load() beech mein aakar is naye account
+                # ko save() se overwrite/wipe kar sakta tha ("auto delete" bug).
+                with _data_lock:
+                    d2 = load()
+                    d2["accounts"] = [a for a in d2["accounts"] if a["phone"] != phone]
+                    d2["accounts"].append(entry)
+                    # Account owner record karo
+                    d2.setdefault("account_owners", {})[phone] = str(uid)
+                    save(d2)
                 # ── Automatic Userbot: naya account turant watcher thread shuru kare ──
                 threading.Thread(
                     target=_auto_start_userbot,
@@ -6807,11 +6822,16 @@ def handle_message(msg):
                          "owner_id": str(uid),
                          "owner_name": adder_name,
                          "added_at": __import__("datetime").datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")}
-                d2["accounts"] = [a for a in d2["accounts"] if a["phone"] != phone]
-                d2["accounts"].append(entry)
-                # Account owner record karo
-                d2.setdefault("account_owners", {})[phone] = str(uid)
-                save(d2)
+                # FIX: load+mutate+save ko ek hi lock ke andar atomic banaya —
+                # taaki koi concurrent handler ka stale save() is naye account ko
+                # wipe na kar sake ("auto delete" bug).
+                with _data_lock:
+                    d2 = load()
+                    d2["accounts"] = [a for a in d2["accounts"] if a["phone"] != phone]
+                    d2["accounts"].append(entry)
+                    # Account owner record karo
+                    d2.setdefault("account_owners", {})[phone] = str(uid)
+                    save(d2)
                 # ── Automatic Userbot: naya account turant watcher thread shuru kare ──
                 threading.Thread(
                     target=_auto_start_userbot,
